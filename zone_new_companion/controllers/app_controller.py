@@ -10,11 +10,12 @@ from urllib.parse import parse_qs, urlparse
 
 from zone_new_companion.services.logger_service import logger_service
 
-from PyQt6.QtCore import QThreadPool
+from PyQt6.QtCore import QRunnable, QThreadPool
 
 from zone_new_companion.config import AppConfig, ConfigStore
 from zone_new_companion.models import Credentials, MediaItem, PlaylistCategory, PortalType
 from zone_new_companion.services.base import PortalService
+from zone_new_companion.services.bulk_checker import BulkChecker, BulkResult
 from zone_new_companion.services.m3u_service import M3UService
 from zone_new_companion.services.ocr_service import OCRService
 from zone_new_companion.services.player_launcher import launch_stream
@@ -22,7 +23,7 @@ from zone_new_companion.services.stalker_service import StalkerService
 from zone_new_companion.services.stream_verifier import StreamVerifier
 from zone_new_companion.services.xtream_service import XtreamService
 from zone_new_companion.state import StateStore
-from zone_new_companion.workers.task_worker import TaskWorker
+from zone_new_companion.workers.task_worker import BulkCheckSignals, TaskWorker
 
 LOGGER = logging.getLogger(__name__)
 
@@ -43,6 +44,7 @@ class AppController:
         self._verifier = StreamVerifier()
         self._ocr_service = OCRService()
         self._navigation_stack: dict[str, list[list[MediaItem]]] = {"Live": [], "Movies": [], "Series": []}
+        self._bulk_checker: BulkChecker | None = None
 
     @property
     def config(self) -> AppConfig:
@@ -149,8 +151,17 @@ class AppController:
             
             logger_service.info(f"Using service: {service.__class__.__name__}")
             
+            # Switching profiles must fully refresh the bottom section: drop the
+            # previous account's categories, loaded items, verification badges,
+            # now-playing text and back-stack so nothing carries over.
+            self._navigation_stack = {"Live": [], "Movies": [], "Series": []}
             self._state_store.update(
                 active_profile=credentials,
+                categories={"Live": [], "Movies": [], "Series": []},
+                current_items={"Live": [], "Movies": [], "Series": []},
+                verification_results={"Live": {}, "Movies": {}, "Series": {}},
+                persistent_verification_results={},
+                now_playing={"Live": {}, "Movies": {}, "Series": {}},
                 busy=True,
                 status_text=f"Connecting to {credentials.base_url}",
             )
@@ -533,6 +544,58 @@ class AppController:
             status_text=f"Verification done: {ok_count}/{len(results)} reachable.",
         )
         on_success(f"Verification done: {ok_count}/{len(results)}")
+
+    def start_bulk_check(self, raw_text: str) -> BulkCheckSignals:
+        """Run a parallel availability check over pasted Xtream URLs.
+
+        Returns a ``BulkCheckSignals`` the caller connects to for live progress
+        and the final result list. The run is cancellable via
+        ``cancel_bulk_check``.
+        """
+        signals = BulkCheckSignals()
+        lines = raw_text.splitlines()
+        checker = BulkChecker()
+        self._bulk_checker = checker
+
+        def emit_progress(result: BulkResult, done: int, total: int) -> None:
+            signals.progress.emit(result, done, total)
+
+        def task() -> list[BulkResult]:
+            return checker.check_many(lines, progress_cb=emit_progress)
+
+        class _BulkRunnable(QRunnable):
+            def run(self_inner) -> None:  # noqa: N805
+                try:
+                    results = task()
+                    signals.succeeded.emit(results)
+                except Exception as exc:  # noqa: BLE001
+                    signals.failed.emit(str(exc))
+                finally:
+                    signals.finished.emit()
+
+        self._thread_pool.start(_BulkRunnable())
+        return signals
+
+    def cancel_bulk_check(self) -> None:
+        """Stop an in-flight bulk check."""
+        if self._bulk_checker is not None:
+            self._bulk_checker.cancel()
+
+    def connect_from_bulk(
+        self,
+        result: BulkResult,
+        on_success: Callable[[str], None],
+        on_error: Callable[[str], None],
+    ) -> None:
+        """Load a working bulk-check account as the active profile and browse it."""
+        credentials = Credentials(
+            name="Bulk Check",
+            base_url=result.base_url,
+            portal_type=PortalType.XTREAM,
+            username=result.username,
+            password=result.password,
+        )
+        self.connect(credentials, on_success=on_success, on_error=on_error)
 
     def reset_form(self) -> None:
         """Reset state without losing saved profiles."""

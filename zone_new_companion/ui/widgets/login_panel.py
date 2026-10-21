@@ -23,6 +23,7 @@ class LoginPanel(QWidget):
 
     connect_clicked = pyqtSignal(object)
     reset_clicked = pyqtSignal()
+    bulk_check_clicked = pyqtSignal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -87,8 +88,11 @@ class LoginPanel(QWidget):
         self.connect_button.setToolTip("Connect using selected configuration")
         self.reset_button = QPushButton("Reset")
         self.reset_button.setToolTip("Clear all form fields")
+        self.bulk_check_button = QPushButton("Bulk Check")
+        self.bulk_check_button.setToolTip("Check many Xtream URLs at once, then browse a working one")
         buttons_layout.addWidget(self.connect_button)
         buttons_layout.addWidget(self.reset_button)
+        buttons_layout.addWidget(self.bulk_check_button)
 
         # Info panel
         self.info_group = QGroupBox("Connection Information")
@@ -111,6 +115,7 @@ class LoginPanel(QWidget):
         # Connect signals
         self.connect_button.clicked.connect(self._emit_credentials)
         self.reset_button.clicked.connect(self.reset_clicked.emit)
+        self.bulk_check_button.clicked.connect(self.bulk_check_clicked.emit)
 
 
     def _emit_credentials(self) -> None:

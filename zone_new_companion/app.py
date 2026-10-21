@@ -32,6 +32,7 @@ from zone_new_companion.logging_config import configure_logging
 from zone_new_companion.models import MediaItem, PlaylistCategory
 from zone_new_companion.state import StateStore
 from zone_new_companion.ui.main_window import MainWindow
+from zone_new_companion.ui.widgets.bulk_check_dialog import BulkCheckDialog
 from zone_new_companion import __version__
 
 
@@ -101,6 +102,14 @@ def run() -> None:
     )
     window.now_playing_requested.connect(lambda tab_name, item: controller.request_now_playing(tab_name, item))
     window.reset_requested.connect(lambda: _reset(window, controller))
+    window.bulk_check_requested.connect(lambda: _open_bulk_check(window, controller, on_error))
+    window.working_account_selected.connect(
+        lambda result: controller.connect_from_bulk(
+            result,
+            on_success=lambda message: _on_connect_success(window, controller, message),
+            on_error=on_error,
+        ),
+    )
 
     if controller.config.last_input:
         window.populate_form(controller.config.last_input)
@@ -155,6 +164,20 @@ def _pick_history(window: MainWindow, controller: AppController, index: int) -> 
     if 0 <= index < len(history):
         window.populate_form(history[index])
         window.notify("Loaded credentials from history")
+
+
+def _open_bulk_check(
+    window: MainWindow,
+    controller: AppController,
+    on_error: Callable[[str], None],
+) -> None:
+    dialog = BulkCheckDialog(controller, parent=window)
+    # The dialog hands back every working account; the main window renders them
+    # as a pickable list and each click loads that account's streams.
+    dialog.accounts_chosen.connect(window.show_working_accounts)
+    # Make sure a running check is cancelled if the dialog is dismissed.
+    dialog.finished.connect(lambda _code: controller.cancel_bulk_check())
+    dialog.exec()
 
 
 def _reset(window: MainWindow, controller: AppController) -> None:

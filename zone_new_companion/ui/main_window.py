@@ -6,6 +6,7 @@ import sys
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -45,6 +46,8 @@ class MainWindow(QMainWindow):
     now_playing_requested = pyqtSignal(str, object)
     back_requested = pyqtSignal(str)
     reset_requested = pyqtSignal()
+    bulk_check_requested = pyqtSignal()
+    working_account_selected = pyqtSignal(object)
     history_selected = pyqtSignal(int)
     history_clear_requested = pyqtSignal()
     def __init__(self) -> None:
@@ -87,11 +90,25 @@ class MainWindow(QMainWindow):
         self.login_panel = LoginPanel()
         self.login_panel.connect_clicked.connect(self.connect_requested.emit)
         self.login_panel.reset_clicked.connect(self._confirm_reset)
+        self.login_panel.bulk_check_clicked.connect(self.bulk_check_requested.emit)
         layout.addWidget(self.login_panel, 0)
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
-        
+
+        # Working accounts from a bulk check. Hidden until a check hands some
+        # over; clicking one loads its streams into the tabs below.
+        self.accounts_group = QGroupBox("Working Accounts")
+        accounts_layout = QVBoxLayout(self.accounts_group)
+        self.accounts_list = QListWidget()
+        self.accounts_list.setToolTip("Working accounts from the last bulk check - click one to browse its streams")
+        self.accounts_list.setAlternatingRowColors(True)
+        self.accounts_list.setMaximumHeight(140)
+        self.accounts_list.itemClicked.connect(self._emit_working_account)
+        accounts_layout.addWidget(self.accounts_list)
+        self.accounts_group.hide()
+        right_layout.addWidget(self.accounts_group)
+
         # Create tab widget (verify button moved to titlebar menu)
         self.tab_widget = QTabWidget()
         
@@ -289,6 +306,28 @@ class MainWindow(QMainWindow):
                 table.setCellWidget(row, 4, play_button)
 
                 self._apply_row_color(table, row, status)
+
+    def show_working_accounts(self, results: list) -> None:
+        """Render the working accounts from a bulk check and reveal the list."""
+        self.accounts_list.clear()
+        for result in results:
+            label = f"{result.username} @ {result.real_url or result.base_url}"
+            if result.expiry:
+                label += f"  ·  expires {result.expiry}"
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, result)
+            self.accounts_list.addItem(item)
+        if results:
+            self.accounts_group.show()
+            self.accounts_list.setCurrentRow(0)
+            self.notify(f"{len(results)} working account(s) ready — click one to browse")
+        else:
+            self.accounts_group.hide()
+
+    def _emit_working_account(self, item: QListWidgetItem) -> None:
+        result = item.data(Qt.ItemDataRole.UserRole)
+        if result is not None:
+            self.working_account_selected.emit(result)
 
     def notify(self, text: str) -> None:
         """Show toast notification."""

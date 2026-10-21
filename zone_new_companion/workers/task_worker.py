@@ -15,6 +15,19 @@ class TaskSignals(QObject):
     finished = pyqtSignal()
 
 
+class BulkCheckSignals(QObject):
+    """Signals for a bulk-check run.
+
+    ``progress`` carries (BulkResult, done, total) as each line resolves;
+    ``succeeded`` carries the full list[BulkResult] when the run completes.
+    """
+
+    progress = pyqtSignal(object, int, int)
+    succeeded = pyqtSignal(object)
+    failed = pyqtSignal(str)
+    finished = pyqtSignal()
+
+
 class TaskWorker(QRunnable):
     """Run a callable in QThreadPool and emit status signals."""
 
