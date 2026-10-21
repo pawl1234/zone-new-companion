@@ -1,8 +1,9 @@
 """Bulk Xtream URL availability checker dialog.
 
 Paste many Xtream ``get.php`` / ``player_api.php`` URLs (one per line), check
-them all in parallel, then review the working accounts (and, collapsed, the
-non-working ones) and jump back into the main window to browse + stream them.
+them all in parallel, then review the working accounts, the ones whose server
+is only unreachable right now (kept for a later Recheck) and, collapsed, the
+rejected ones, and jump back into the main window to browse + stream them.
 """
 
 from __future__ import annotations
@@ -24,12 +25,13 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
-from zone_new_companion.services.bulk_checker import BulkResult
+from zone_new_companion.services.bulk_checker import BulkResult, friendly_error, is_server_unavailable
 
 if TYPE_CHECKING:
     from zone_new_companion.controllers.app_controller import AppController
 
 _WORKING_COLUMNS = ["#", "Server", "Expiry", "Max Conn", "Active", "Timezone", "Account"]
+_UNREACHABLE_COLUMNS = ["#", "Server", "Account", "Reason"]
 _FAILED_COLUMNS = ["#", "URL", "Reason"]
 
 _PLACEHOLDER = (
@@ -91,6 +93,16 @@ class BulkCheckDialog(QDialog):
         self.working_table.cellDoubleClicked.connect(lambda *_: self._browse())
         root.addWidget(self.working_table, 3)
 
+        # --- server unreachable: kept, since the server may come back -------
+        self.unreachable_header = QLabel()
+        self.unreachable_header.setToolTip(
+            "The server did not answer or was overloaded - the account itself was not refused.\n"
+            "These are added to Working Accounts with a red light; Recheck turns them green once the server is back.",
+        )
+        root.addWidget(self.unreachable_header)
+        self.unreachable_table = self._make_table(_UNREACHABLE_COLUMNS, stretch_cols=(1, 3))
+        root.addWidget(self.unreachable_table, 1)
+
         # --- non-working accounts (collapsed) -----------------------------
         self.failed_toggle = QPushButton("▶ Non-working accounts (0)")
         self.failed_toggle.setCheckable(True)
@@ -105,7 +117,9 @@ class BulkCheckDialog(QDialog):
         footer = QHBoxLayout()
         footer.addStretch(1)
         self.browse_button = QPushButton("Browse streams")
-        self.browse_button.setToolTip("Return to the main window with all working accounts")
+        self.browse_button.setToolTip(
+            "Return to the main window with all working accounts\n(plus the ones whose server is unreachable, marked red)",
+        )
         self.browse_button.setEnabled(False)
         self.browse_button.clicked.connect(self._browse)
         self.close_button = QPushButton("Close")
@@ -113,6 +127,7 @@ class BulkCheckDialog(QDialog):
         footer.addWidget(self.browse_button)
         footer.addWidget(self.close_button)
         root.addLayout(footer)
+        self._update_unreachable_section()
 
     @staticmethod
     def _make_table(columns: list[str], *, stretch_cols: tuple[int, ...]) -> QTableWidget:
@@ -138,6 +153,7 @@ class BulkCheckDialog(QDialog):
             return
 
         self.working_table.setRowCount(0)
+        self.unreachable_table.setRowCount(0)
         self.failed_table.setRowCount(0)
         self._rows.clear()
         self._running = True
@@ -149,6 +165,7 @@ class BulkCheckDialog(QDialog):
         self.progress.show()
         self.summary_label.setText("Checking...")
         self._update_failed_toggle()
+        self._update_unreachable_section()
 
         self._signals = self._controller.start_bulk_check(raw)
         self._signals.progress.connect(self._on_progress)
@@ -173,7 +190,9 @@ class BulkCheckDialog(QDialog):
             self._upsert_row(result)
         ok = self.working_table.rowCount()
         total = len(results)
-        self.summary_label.setText(f"Done · {ok}/{total} available")
+        unreachable = self.unreachable_table.rowCount()
+        kept = f" · {unreachable} server unreachable (kept)" if unreachable else ""
+        self.summary_label.setText(f"Done · {ok}/{total} available{kept}")
         self.progress.setRange(0, max(1, total))
         self.progress.setValue(total)
 
@@ -187,12 +206,17 @@ class BulkCheckDialog(QDialog):
         self.input_box.setReadOnly(False)
         self.progress.hide()
         self._signals = None
-        self.browse_button.setEnabled(self.working_table.rowCount() > 0)
+        self.browse_button.setEnabled(bool(self._working_results()))
 
     # --- table helpers -------------------------------------------------
 
     def _upsert_row(self, result: BulkResult) -> None:
-        table = self.working_table if result.ok else self.failed_table
+        if result.ok:
+            table = self.working_table
+        elif is_server_unavailable(result):
+            table = self.unreachable_table
+        else:
+            table = self.failed_table
         existing = self._rows.get(result.line_number)
         if existing is not None and existing[0] is table:
             row = existing[1]
@@ -211,6 +235,13 @@ class BulkCheckDialog(QDialog):
                 result.timezone,
                 result.username,
             ]
+        elif table is self.unreachable_table:
+            values = [
+                str(result.line_number),
+                result.base_url,
+                result.username,
+                friendly_error(result.error),
+            ]
         else:
             values = [
                 str(result.line_number),
@@ -222,13 +253,21 @@ class BulkCheckDialog(QDialog):
             cell = QTableWidgetItem(text)
             if col == 0:
                 cell.setData(Qt.ItemDataRole.UserRole, result)
-            self.table_set(table, row, col, cell, result.ok)
+            if col == len(values) - 1 and table is not self.working_table:
+                cell.setToolTip(result.error)
+            self.table_set(table, row, col, cell, result)
 
         self._update_failed_toggle()
+        self._update_unreachable_section()
 
     @staticmethod
-    def table_set(table: QTableWidget, row: int, col: int, cell: QTableWidgetItem, ok: bool) -> None:
-        cell.setBackground(QColor(46, 125, 50, 90) if ok else QColor(120, 40, 40, 70))
+    def table_set(table: QTableWidget, row: int, col: int, cell: QTableWidgetItem, result: BulkResult) -> None:
+        if result.ok:
+            cell.setBackground(QColor(46, 125, 50, 90))
+        elif is_server_unavailable(result):
+            cell.setBackground(QColor(200, 140, 30, 70))
+        else:
+            cell.setBackground(QColor(120, 40, 40, 70))
         table.setItem(row, col, cell)
 
     def _toggle_failed(self, checked: bool) -> None:
@@ -239,15 +278,25 @@ class BulkCheckDialog(QDialog):
         arrow = "▼" if self.failed_toggle.isChecked() else "▶"
         self.failed_toggle.setText(f"{arrow} Non-working accounts ({self.failed_table.rowCount()})")
 
+    def _update_unreachable_section(self) -> None:
+        count = self.unreachable_table.rowCount()
+        self.unreachable_header.setText(
+            f"Server unreachable ({count}) - kept in Working Accounts (red) for a later Recheck",
+        )
+        self.unreachable_header.setVisible(count > 0)
+        self.unreachable_table.setVisible(count > 0)
+
     def _working_results(self) -> list[BulkResult]:
+        """Accounts to hand over: working ones, then unreachable-server ones."""
         results: list[BulkResult] = []
-        for row in range(self.working_table.rowCount()):
-            cell = self.working_table.item(row, 0)
-            if cell is None:
-                continue
-            data = cell.data(Qt.ItemDataRole.UserRole)
-            if isinstance(data, BulkResult) and data.ok:
-                results.append(data)
+        for table in (self.working_table, self.unreachable_table):
+            for row in range(table.rowCount()):
+                cell = table.item(row, 0)
+                if cell is None:
+                    continue
+                data = cell.data(Qt.ItemDataRole.UserRole)
+                if isinstance(data, BulkResult) and (data.ok or is_server_unavailable(data)):
+                    results.append(data)
         return results
 
     def _browse(self) -> None:

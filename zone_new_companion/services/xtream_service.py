@@ -21,7 +21,10 @@ class XtreamService(PortalService):
     def __init__(self) -> None:
         self._session = OptimizedSession()
         self._xmltv_cache: bytes | None = None
-        self._player_api_endpoint: str | None = None
+        # Working API endpoint per base URL; one service serves every account,
+        # so a single cached endpoint would send later accounts' requests to
+        # the first server (which answers 200 with empty lists).
+        self._player_api_endpoints: dict[str, str] = {}
 
     @staticmethod
     def _coerce_row_list(payload: Any) -> list[dict[str, Any]]:
@@ -82,7 +85,8 @@ class XtreamService(PortalService):
         if extra_params:
             params.update(extra_params)
 
-        endpoints = [self._player_api_endpoint] if self._player_api_endpoint else []
+        cached = self._player_api_endpoints.get(credentials.base_url)
+        endpoints = [cached] if cached else []
         endpoints.extend(self._candidate_api_endpoints(credentials.base_url))
         last_error: Exception | None = None
         for endpoint in dict.fromkeys([ep for ep in endpoints if ep]):
@@ -96,7 +100,7 @@ class XtreamService(PortalService):
                         response = request(endpoint, data=params, timeout=DEFAULT_TIMEOUT)
                     response.raise_for_status()
                     payload = response.json()
-                    self._player_api_endpoint = endpoint
+                    self._player_api_endpoints[credentials.base_url] = endpoint
                     return payload
             except (requests.RequestException, ValueError, RuntimeError) as exc:
                 last_error = exc
@@ -121,8 +125,8 @@ class XtreamService(PortalService):
                 )
                 for row in rows
             ]
-            # Sort categories alphabetically
-            grouped[tab] = sorted(categories, key=lambda x: x.name.lower())
+            # Keep the provider's category order as returned by the panel.
+            grouped[tab] = categories
         return grouped
 
     def fetch_connection_info(self, credentials: Credentials) -> dict[str, str]:
@@ -162,11 +166,18 @@ class XtreamService(PortalService):
         }
 
     def fetch_items(self, credentials: Credentials, category: PlaylistCategory) -> list[MediaItem]:
-        if category.media_kind == "live":
+        return self._fetch_items(credentials, category.media_kind, category.id)
+
+    def fetch_all_items(self, credentials: Credentials, media_kind: str) -> list[MediaItem]:
+        """Every stream of a kind in one request (the API without category_id)."""
+        return self._fetch_items(credentials, media_kind, None)
+
+    def _fetch_items(self, credentials: Credentials, media_kind: str, category_id: str | None) -> list[MediaItem]:
+        if media_kind == "live":
             action = "get_live_streams"
             prefix = "live"
             item_type = "channel"
-        elif category.media_kind == "movies":
+        elif media_kind == "movies":
             action = "get_vod_streams"
             prefix = "movie"
             item_type = "vod"
@@ -175,7 +186,8 @@ class XtreamService(PortalService):
             prefix = "series"
             item_type = "series"
 
-        payload = self._request_api(credentials, action=action, extra_params={"category_id": category.id})
+        extra_params = {"category_id": category_id} if category_id is not None else None
+        payload = self._request_api(credentials, action=action, extra_params=extra_params)
         rows = self._coerce_row_list(payload)
         items: list[MediaItem] = []
         for row in rows:
@@ -192,14 +204,15 @@ class XtreamService(PortalService):
                 MediaItem(
                     id=str(stream_id or ""),
                     name=str(row.get("name", "Unnamed")),
-                    media_kind=category.media_kind,
+                    media_kind=media_kind,
                     item_type=item_type,
                     metadata=row,
                     stream_url=stream_url,
                 ),
             )
-        # Sort items alphabetically (case-insensitive)
-        return sorted(items, key=lambda x: x.name.lower())
+        # Provider order: the panel's channel number ("num"); stable sort keeps
+        # the API order for rows without one.
+        return sorted(items, key=lambda x: _provider_num(x.metadata))
 
     def resolve_stream_url(self, credentials: Credentials, item: MediaItem) -> str:
         if item.stream_url:
@@ -338,3 +351,11 @@ class XtreamService(PortalService):
             return children
 
         return []
+
+
+def _provider_num(row: dict) -> float:
+    """Return the panel-assigned position of a stream, or +inf when missing."""
+    try:
+        return float(row.get("num"))
+    except (TypeError, ValueError):
+        return float("inf")

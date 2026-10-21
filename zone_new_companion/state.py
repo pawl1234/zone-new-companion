@@ -33,8 +33,15 @@ class AppState:
     now_playing: dict[str, dict[str, str]] = field(
         default_factory=lambda: {"Live": {}, "Movies": {}, "Series": {}},
     )
+    # Key of country_filter.LANGUAGES ("de"); empty shows everything.
+    language: str = ""
+    # Hide untagged categories/items too, not only other countries.
+    language_strict: bool = True
     status_text: str = "Ready"
     busy: bool = False
+    # Labels of background loads in flight (category, series, stream resolve).
+    # They don't block the UI; the status bar shows the newest one.
+    activity: tuple[str, ...] = ()
 
 
 class StateStore(QObject):

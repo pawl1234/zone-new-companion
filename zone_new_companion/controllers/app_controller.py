@@ -15,7 +15,20 @@ from PyQt6.QtCore import QRunnable, QThreadPool
 from zone_new_companion.config import AppConfig, ConfigStore
 from zone_new_companion.models import Credentials, MediaItem, PlaylistCategory, PortalType
 from zone_new_companion.services.base import PortalService
-from zone_new_companion.services.bulk_checker import BulkChecker, BulkResult
+from zone_new_companion.services.bulk_checker import (
+    BulkChecker,
+    BulkResult,
+    account_key,
+    carry_stream_history,
+    credentials_for,
+    friendly_error,
+    mark_server_unavailable,
+    now_stamp,
+    result_from_credentials,
+)
+from zone_new_companion.services.country_filter import codes_for_language, filter_items
+from zone_new_companion.services.filter_debug import FilterDebugDumper, debug_enabled
+from zone_new_companion.services.hls_probe import find_hls_url
 from zone_new_companion.services.m3u_service import M3UService
 from zone_new_companion.services.ocr_service import OCRService
 from zone_new_companion.services.player_launcher import launch_stream
@@ -45,6 +58,18 @@ class AppController:
         self._ocr_service = OCRService()
         self._navigation_stack: dict[str, list[list[MediaItem]]] = {"Live": [], "Movies": [], "Series": []}
         self._bulk_checker: BulkChecker | None = None
+        # Background loads shown in the status bar, keyed by a running token.
+        self._activities: dict[int, str] = {}
+        self._next_activity = 0
+        # Per tab: bumped by every new load so a slower, older one is dropped
+        # when it finally returns; plus what is loading and its activity.
+        self._load_generation: dict[str, int] = {"Live": 0, "Movies": 0, "Series": 0}
+        self._loading_key: dict[str, str | None] = {"Live": None, "Movies": None, "Series": None}
+        self._loading_activity: dict[str, int | None] = {"Live": None, "Movies": None, "Series": None}
+        self._resolving: set[str] = set()
+        # DEBUG=1 / --debug: write loaded lists and filter verdicts to disk.
+        self._debug = FilterDebugDumper() if debug_enabled() else None
+        self._state_store.update(language=self._config.ui.language, language_strict=self._config.ui.language_strict)
 
     @property
     def config(self) -> AppConfig:
@@ -155,6 +180,8 @@ class AppController:
             # previous account's categories, loaded items, verification badges,
             # now-playing text and back-stack so nothing carries over.
             self._navigation_stack = {"Live": [], "Movies": [], "Series": []}
+            for tab_name in self._load_generation:
+                self._supersede_load(tab_name)
             self._state_store.update(
                 active_profile=credentials,
                 categories={"Live": [], "Movies": [], "Series": []},
@@ -170,7 +197,8 @@ class AppController:
                 logger_service.debug("Fetching categories and connection info...")
                 categories = service.fetch_categories(credentials)
                 info = service.fetch_connection_info(credentials)
-                logger_service.info(f"Retrieved {len(categories)} categories")
+                counts = ", ".join(f"{tab}: {len(rows)}" for tab, rows in categories.items())
+                logger_service.info(f"Retrieved categories ({counts})")
                 return categories, info
 
             worker = TaskWorker(task)
@@ -192,6 +220,10 @@ class AppController:
     ) -> None:
         categories, connection_info = payload
         self._remember_success(credentials)
+        if self._debug is not None:
+            state = self._state_store.state
+            path = self._debug.record_categories(credentials, categories, state.language, state.language_strict)
+            LOGGER.info("Debug dump: %s", path)
         self._state_store.update(
             categories=categories,
             credential_info=connection_info,
@@ -206,27 +238,130 @@ class AppController:
         on_success: Callable[[str], None],
         on_error: Callable[[str], None],
     ) -> None:
-        """Load category items asynchronously."""
-        state = self._state_store.state
-        profile = state.active_profile
+        """Load category items in the background; the UI stays usable."""
+        profile = self._state_store.state.active_profile
         if profile is None:
             on_error("No active profile.")
             return
-        if self._state_store.state.busy:
-            on_error("Another operation is in progress.")
-            return
-        self._state_store.update(busy=True, status_text=f"Loading {tab_name} items...")
+        self._load_into_tab(
+            tab_name,
+            key=f"category:{category.id}",
+            label=f"{tab_name}: loading '{category.name}'",
+            fetch=lambda: self._fetch_category(profile, tab_name, category),
+            title=category.name,
+            push_stack=False,
+            on_success=on_success,
+            on_error=on_error,
+        )
 
-        def task() -> list[MediaItem]:
-            return self._service_for(profile).fetch_items(profile, category)
+    def _fetch_category(self, profile: Credentials, tab_name: str, category: PlaylistCategory) -> list[MediaItem]:
+        """Worker-thread fetch of one category; recorded when debugging."""
+        items = self._service_for(profile).fetch_items(profile, category)
+        if self._debug is not None:
+            state = self._state_store.state
+            self._debug.record_items(profile, tab_name, category, items, state.language, state.language_strict)
+        return items
+
+    @property
+    def debug_enabled(self) -> bool:
+        return self._debug is not None
+
+    def dump_full_catalog(self, on_success: Callable[[str], None], on_error: Callable[[str], None]) -> None:
+        """Debug: fetch every category's streams and write them to the dump."""
+        profile = self._state_store.state.active_profile
+        if self._debug is None or profile is None:
+            on_error("Connect to an account first.")
+            return
+        service = self._service_for(profile)
+        categories = self._state_store.state.categories
+        state = self._state_store.state
+        token = self._begin_activity("Debug: dumping full catalog…")
+
+        def task() -> str:
+            for tab_name, tab_categories in categories.items():
+                if isinstance(service, XtreamService) and tab_categories:
+                    # One request per kind instead of one per category.
+                    grouped: dict[str, list[MediaItem]] = {}
+                    for item in service.fetch_all_items(profile, tab_categories[0].media_kind):
+                        grouped.setdefault(str(item.metadata.get("category_id", "")), []).append(item)
+                    fetched = [(category, grouped.get(category.id, [])) for category in tab_categories]
+                else:
+                    fetched = [(category, service.fetch_items(profile, category)) for category in tab_categories]
+                for category, items in fetched:
+                    self._debug.record_items(profile, tab_name, category, items, state.language, state.language_strict)
+            return str(self._debug.path_for(profile))
 
         worker = TaskWorker(task)
-        worker.signals.succeeded.connect(
-            lambda items: self._on_items_loaded(tab_name, items, on_success, push_stack=False),
-        )
+        worker.signals.succeeded.connect(lambda path: on_success(f"Catalog written to {path}"))
         worker.signals.failed.connect(lambda message: self._on_error(message, on_error))
-        worker.signals.finished.connect(lambda: self._state_store.update(busy=False))
+        worker.signals.finished.connect(lambda: self._end_activity(token))
         self._thread_pool.start(worker)
+
+    def _load_into_tab(
+        self,
+        tab_name: str,
+        *,
+        key: str,
+        label: str,
+        fetch: Callable[[], list[MediaItem]],
+        title: str,
+        push_stack: bool,
+        on_success: Callable[[str], None],
+        on_error: Callable[[str], None],
+    ) -> None:
+        """Fetch a list for a tab without blocking anything else.
+
+        Clicking the same entry again while it loads (a double click) is
+        ignored; clicking another one replaces the pending load, and the
+        older result is dropped when it arrives.
+        """
+        if self._loading_key[tab_name] == key:
+            return
+        generation = self._supersede_load(tab_name)
+        self._loading_key[tab_name] = key
+        self._loading_activity[tab_name] = self._begin_activity(f"{label}…")
+
+        def is_current() -> bool:
+            return self._load_generation[tab_name] == generation
+
+        def on_loaded(items: list[MediaItem]) -> None:
+            if is_current():
+                self._on_items_loaded(tab_name, items, on_success, push_stack=push_stack, title=title)
+
+        def on_failed(message: str) -> None:
+            if is_current():
+                self._on_error(message, on_error)
+
+        def on_finished() -> None:
+            if is_current():
+                self._supersede_load(tab_name)
+
+        worker = TaskWorker(fetch)
+        worker.signals.succeeded.connect(on_loaded)
+        worker.signals.failed.connect(on_failed)
+        worker.signals.finished.connect(on_finished)
+        self._thread_pool.start(worker)
+
+    def _supersede_load(self, tab_name: str) -> int:
+        """Forget the tab's pending load (if any); return the new generation."""
+        self._load_generation[tab_name] += 1
+        self._loading_key[tab_name] = None
+        token = self._loading_activity[tab_name]
+        self._loading_activity[tab_name] = None
+        if token is not None:
+            self._end_activity(token)
+        return self._load_generation[tab_name]
+
+    def _begin_activity(self, label: str) -> int:
+        self._next_activity += 1
+        self._activities[self._next_activity] = label
+        self._state_store.update(activity=tuple(self._activities.values()), status_text=label)
+        return self._next_activity
+
+    def _end_activity(self, token: int) -> None:
+        if self._activities.pop(token, None) is None:
+            return
+        self._state_store.update(activity=tuple(self._activities.values()))
 
     def _on_items_loaded(
         self,
@@ -235,6 +370,7 @@ class AppController:
         on_success: Callable[[str], None],
         *,
         push_stack: bool,
+        title: str,
     ) -> None:
         current = dict(self._state_store.state.current_items)
         if push_stack and current.get(tab_name):
@@ -244,11 +380,18 @@ class AppController:
         verification[tab_name] = {}
         now_playing = dict(self._state_store.state.now_playing)
         now_playing[tab_name] = {}
+        status = f"{tab_name} · {title}: {len(items)} items"
+        state = self._state_store.state
+        if state.language:
+            shown = len(filter_items(
+                items, codes_for_language(state.language), state.categories.get(tab_name, []), state.language_strict,
+            ))
+            status += f" ({shown} shown for the language filter)"
         self._state_store.update(
             current_items=current,
             verification_results=verification,
             now_playing=now_playing,
-            status_text=f"{len(items)} items loaded.",
+            status_text=status,
         )
         on_success(f"{tab_name}: {len(items)} entries")
 
@@ -256,27 +399,81 @@ class AppController:
         if tab_name == "Live":
             self._prefetch_now_playing(items[:10])
 
-    def play(self, item: MediaItem, on_success: Callable[[str], None], on_error: Callable[[str], None]) -> None:
-        """Resolve stream and launch VLC asynchronously."""
+    def play(
+        self,
+        item: MediaItem,
+        on_success: Callable[[str], None],
+        on_error: Callable[[str], None],
+        prefer_hls: bool = False,
+    ) -> None:
+        """Resolve stream and launch VLC asynchronously.
+
+        With prefer_hls the stream's HLS (.m3u8) variant plays instead; it is an
+        error when the server offers none.
+        """
         profile = self._state_store.state.active_profile
         if profile is None:
             on_error("No active profile.")
             return
-        if self._state_store.state.busy:
-            on_error("Another operation is in progress.")
+        # A double click (or a click on ▶ right after) asks again while the
+        # first request still resolves; one player window is enough.
+        if item.id in self._resolving:
             return
-
-        self._state_store.update(busy=True, status_text=f"Resolving stream for {item.name}")
+        self._resolving.add(item.id)
+        token = self._begin_activity(f"Starting {item.name}…")
 
         def task() -> str:
             stream_url = self._service_for(profile).resolve_stream_url(profile, item)
+            if prefer_hls:
+                hls_url = find_hls_url(stream_url)
+                if hls_url is None:
+                    raise ValueError(f"No HLS (m3u8) stream for {item.name}.")
+                stream_url = hls_url
             launch_stream(stream_url)
             return stream_url
 
+        def on_played(_url: str) -> None:
+            label = f"Playing {item.name}" + (" (HLS)" if prefer_hls else "")
+            self._state_store.update(status_text=label)
+            on_success(label)
+
+        def on_finished() -> None:
+            self._resolving.discard(item.id)
+            self._end_activity(token)
+
         worker = TaskWorker(task)
-        worker.signals.succeeded.connect(lambda _: on_success(f"Playing {item.name}"))
+        worker.signals.succeeded.connect(on_played)
         worker.signals.failed.connect(lambda message: self._on_error(message, on_error))
-        worker.signals.finished.connect(lambda: self._state_store.update(busy=False, status_text="Ready"))
+        worker.signals.finished.connect(on_finished)
+        self._thread_pool.start(worker)
+
+    def probe_hls(
+        self,
+        item: MediaItem,
+        on_result: Callable[[str | None], None],
+        on_error: Callable[[str], None],
+    ) -> None:
+        """Look for an HLS (.m3u8) variant of the item's stream; None if the server has none."""
+        profile = self._state_store.state.active_profile
+        if profile is None:
+            on_error("No active profile.")
+            return
+        if item.item_type not in {"channel", "vod", "episode"}:
+            on_error("Item is not a playable stream.")
+            return
+        token = self._begin_activity(f"Checking HLS for {item.name}…")
+
+        def task() -> str | None:
+            stream_url = self._service_for(profile).resolve_stream_url(profile, item)
+            return find_hls_url(stream_url)
+
+        def on_finished() -> None:
+            self._end_activity(token)
+
+        worker = TaskWorker(task)
+        worker.signals.succeeded.connect(on_result)
+        worker.signals.failed.connect(lambda message: self._on_error(message, on_error))
+        worker.signals.finished.connect(on_finished)
         self._thread_pool.start(worker)
 
     def activate_item(
@@ -303,23 +500,22 @@ class AppController:
         if profile is None:
             on_error("No active profile.")
             return
-        self._state_store.update(busy=True, status_text=f"Loading children for {item.name}")
-
-        def task() -> list[MediaItem]:
-            return self._service_for(profile).fetch_series_children(profile, item)
-
-        worker = TaskWorker(task)
-        worker.signals.succeeded.connect(
-            lambda items: self._on_items_loaded(tab_name, items, on_success, push_stack=True),
+        self._load_into_tab(
+            tab_name,
+            key=f"{item.item_type}:{item.id}",
+            label=f"{tab_name}: opening '{item.name}'",
+            fetch=lambda: self._service_for(profile).fetch_series_children(profile, item),
+            title=item.name,
+            push_stack=True,
+            on_success=on_success,
+            on_error=on_error,
         )
-        worker.signals.failed.connect(lambda message: self._on_error(message, on_error))
-        worker.signals.finished.connect(lambda: self._state_store.update(busy=False))
-        self._thread_pool.start(worker)
 
     def go_back(self, tab_name: str) -> bool:
         """Pop last media view for a tab."""
         if not self._navigation_stack[tab_name]:
             return False
+        self._supersede_load(tab_name)
         previous = self._navigation_stack[tab_name].pop()
         current = dict(self._state_store.state.current_items)
         current[tab_name] = previous
@@ -343,7 +539,7 @@ class AppController:
         if profile is None:
             on_error("No active profile.")
             return
-        tab_items = self._state_store.state.current_items.get(tab_name, [])
+        tab_items = self._visible_items(tab_name)
         if not tab_items:
             on_error("No loaded items to verify.")
             return
@@ -359,9 +555,8 @@ class AppController:
             def on_verification_update(item_id: str, status: str, verified_count: int, total_count: int):
                 # Update verification results in real-time
                 verification = dict(self._state_store.state.verification_results)
-                if tab_name not in verification:
-                    verification[tab_name] = {}
-                verification[tab_name][item_id] = status
+                # Copy the tab's map too: the table compares by identity to repaint.
+                verification[tab_name] = {**verification.get(tab_name, {}), item_id: status}
                 
                 # Update status text with progress
                 progress_percent = (verified_count / total_count) * 100
@@ -430,7 +625,7 @@ class AppController:
             on_error("No active profile.")
             return
 
-        items = self._state_store.state.current_items.get(tab_name, [])
+        items = self._visible_items(tab_name)
         if not items:
             on_error("No items to verify in this tab.")
             return
@@ -552,8 +747,15 @@ class AppController:
         and the final result list. The run is cancellable via
         ``cancel_bulk_check``.
         """
-        signals = BulkCheckSignals()
         lines = raw_text.splitlines()
+        return self._run_check(lambda checker, progress: checker.check_many(lines, progress_cb=progress))
+
+    def _run_check(
+        self,
+        check: Callable[[BulkChecker, Callable[[BulkResult, int, int], None]], list[BulkResult]],
+    ) -> BulkCheckSignals:
+        """Run ``check(checker, progress)`` in the pool, reporting through signals."""
+        signals = BulkCheckSignals()
         checker = BulkChecker()
         self._bulk_checker = checker
 
@@ -561,7 +763,7 @@ class AppController:
             signals.progress.emit(result, done, total)
 
         def task() -> list[BulkResult]:
-            return checker.check_many(lines, progress_cb=emit_progress)
+            return check(checker, emit_progress)
 
         class _BulkRunnable(QRunnable):
             def run(self_inner) -> None:  # noqa: N805
@@ -581,34 +783,139 @@ class AppController:
         if self._bulk_checker is not None:
             self._bulk_checker.cancel()
 
+    def working_accounts(self) -> list[BulkResult]:
+        """Working accounts saved from the last bulk check, starred first."""
+        return list(self._config.working_accounts)
+
+    def save_working_accounts(self, results: list[BulkResult]) -> None:
+        """Persist the working accounts so they survive a restart."""
+        # Stable sort: starred accounts first, then streaming (green), not yet
+        # checked (grey), not streaming (red); order otherwise kept.
+        stream_rank = {True: 0, None: 1, False: 2}
+        self._config.working_accounts = sorted(
+            results,
+            key=lambda account: (not account.starred, stream_rank[account.stream_ok]),
+        )
+        self._config_store.save(self._config)
+
+    def merge_working_accounts(self, results: list[BulkResult]) -> list[BulkResult]:
+        """Take a new bulk check's accounts without losing starred ones.
+
+        Stars carry over to accounts found again; starred accounts the new
+        check did not include stay in the list.
+        """
+        starred = {account_key(account): account for account in self._config.working_accounts if account.starred}
+        previous = {account_key(account): account for account in self._config.working_accounts}
+        merged: list[BulkResult] = []
+        for result in results:
+            carry_stream_history(result, previous.get(account_key(result)))
+            if starred.pop(account_key(result), None) is not None:
+                result.starred = True
+            merged.append(result)
+        self.save_working_accounts(list(starred.values()) + merged)
+        return self.working_accounts()
+
+    def toggle_working_account_star(self, result: BulkResult) -> list[BulkResult]:
+        """Star or unstar one working account."""
+        key = account_key(result)
+        for account in self._config.working_accounts:
+            if account_key(account) == key:
+                account.starred = not account.starred
+        self.save_working_accounts(self._config.working_accounts)
+        return self.working_accounts()
+
+    def recheck_working_accounts(self) -> BulkCheckSignals:
+        """Re-run the availability check over the saved accounts of every type."""
+        accounts = list(self._config.working_accounts)
+        return self._run_check(lambda checker, progress: checker.check_accounts(accounts, progress_cb=progress))
+
+    def check_new_account(self, credentials: Credentials) -> BulkCheckSignals | str:
+        """Check one account typed into the import bar; an error text if the input is invalid."""
+        credentials = self._normalize_credentials(credentials)
+        self._config.last_input = credentials
+        self._config_store.save(self._config)
+        validation_error = self._validate_input(credentials)
+        if validation_error:
+            return validation_error
+        account = result_from_credentials(credentials)
+        return self._run_check(lambda checker, progress: checker.check_accounts([account], progress_cb=progress))
+
+    def add_working_account(self, result: BulkResult) -> list[BulkResult]:
+        """Put one checked account into the list, replacing an earlier copy of it."""
+        key = account_key(result)
+        kept: list[BulkResult] = []
+        for account in self._config.working_accounts:
+            if account_key(account) == key:
+                carry_stream_history(result, account)
+                result.starred = account.starred
+            else:
+                kept.append(account)
+        self.save_working_accounts([result, *kept])
+        return self.working_accounts()
+
+    def apply_recheck(self, results: list[BulkResult]) -> list[BulkResult]:
+        """Refresh accounts from a recheck; return the ones the server rejected.
+
+        Only a rejection by the server (wrong credentials, expired, banned) is
+        reported for removal. An unreachable or overloaded server may come
+        back, so those accounts stay and just turn red ("down since").
+        Accounts the recheck did not cover (cancelled, or added meanwhile) are
+        left untouched.
+        """
+        fresh = {account_key(result): result for result in results if result.error != "Cancelled."}
+        rejected: list[BulkResult] = []
+        for account in self._config.working_accounts:
+            result = fresh.get(account_key(account))
+            if result is None:
+                continue
+            if not result.ok:
+                # No login means no streaming either.
+                account.error = result.error
+                if result.rejected:
+                    result.stream_ok = False
+                    result.stream_checked_at = now_stamp()
+                    result.stream_status = f"Login rejected: {friendly_error(result.error)}"
+                    rejected.append(account)
+                elif result.stream_ok is None:
+                    mark_server_unavailable(result)
+                carry_stream_history(result, account)
+                account.stream_ok = result.stream_ok
+                account.stream_status = result.stream_status
+                account.stream_checked_at = result.stream_checked_at
+                account.stream_down_since = result.stream_down_since
+                continue
+            if result.stream_ok is not None:
+                carry_stream_history(result, account)
+                account.stream_ok = result.stream_ok
+                account.stream_status = result.stream_status
+                account.stream_checked_at = result.stream_checked_at
+                account.stream_down_since = result.stream_down_since
+            account.error = ""
+            account.status = result.status
+            account.expiry = result.expiry
+            account.max_connections = result.max_connections
+            account.active_connections = result.active_connections
+            account.timezone = result.timezone
+            account.real_url = result.real_url
+        self.save_working_accounts(self._config.working_accounts)
+        return rejected
+
+    def remove_working_accounts(self, accounts: list[BulkResult]) -> list[BulkResult]:
+        """Drop the given accounts from the saved list."""
+        drop = {account_key(account) for account in accounts}
+        self.save_working_accounts(
+            [account for account in self._config.working_accounts if account_key(account) not in drop],
+        )
+        return self.working_accounts()
+
     def connect_from_bulk(
         self,
         result: BulkResult,
         on_success: Callable[[str], None],
         on_error: Callable[[str], None],
     ) -> None:
-        """Load a working bulk-check account as the active profile and browse it."""
-        credentials = Credentials(
-            name="Bulk Check",
-            base_url=result.base_url,
-            portal_type=PortalType.XTREAM,
-            username=result.username,
-            password=result.password,
-        )
-        self.connect(credentials, on_success=on_success, on_error=on_error)
-
-    def reset_form(self) -> None:
-        """Reset state without losing saved profiles."""
-        self._state_store.update(
-            active_profile=None,
-            categories={"Live": [], "Movies": [], "Series": []},
-            current_items={"Live": [], "Movies": [], "Series": []},
-            verification_results={"Live": {}, "Movies": {}, "Series": {}},
-            credential_info={},
-            now_playing={"Live": {}, "Movies": {}, "Series": {}},
-            status_text="Form reset.",
-        )
-        self._navigation_stack = {"Live": [], "Movies": [], "Series": []}
+        """Load a working account (any type) as the active profile and browse it."""
+        self.connect(credentials_for(result), on_success=on_success, on_error=on_error)
 
     def _remember_success(self, credentials: Credentials) -> None:
         LOGGER.info("Saving successful connection for %s", credentials.base_url)
@@ -639,6 +946,32 @@ class AppController:
         LOGGER.error("Operation failed: %s", message)
         self._state_store.update(status_text=f"Error: {message}")
         callback(message)
+
+    def set_language(self, language: str) -> None:
+        """Persist and apply the language filter."""
+        if language == self._state_store.state.language:
+            return
+        self._config.ui.language = language
+        self._config_store.save(self._config)
+        self._state_store.update(language=language)
+
+    def set_language_strict(self, strict: bool) -> None:
+        """Persist and apply whether untagged entries are hidden as well."""
+        if strict == self._state_store.state.language_strict:
+            return
+        self._config.ui.language_strict = strict
+        self._config_store.save(self._config)
+        self._state_store.update(language_strict=strict)
+
+    def _visible_items(self, tab_name: str) -> list[MediaItem]:
+        """Items of a tab after the language filter, as shown in the table."""
+        state = self._state_store.state
+        return filter_items(
+            state.current_items.get(tab_name, []),
+            codes_for_language(state.language),
+            state.categories.get(tab_name, []),
+            state.language_strict,
+        )
 
     def save_ui_state(self, width: int, height: int) -> None:
         """Persist current window size."""

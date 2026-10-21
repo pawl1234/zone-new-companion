@@ -10,7 +10,9 @@ def main():
         # Check for debug mode
         debug_mode = os.getenv("DEBUG", "0") == "1"
         if debug_mode:
-            print("Debug mode enabled")
+            print("Debug mode enabled: dumps go to ~/.zone-new-companion/debug/")
+        # Qt's own logging is very noisy; only on request.
+        if os.getenv("DEBUG_QT", "0") == "1":
             os.environ["QT_LOGGING_RULES"] = "*=true"
         
         # Import and run the application

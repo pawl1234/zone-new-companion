@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from zone_new_companion.models import Credentials, PortalType
+from zone_new_companion.services.bulk_checker import BulkResult
 
 
 @dataclass(slots=True)
@@ -17,6 +18,9 @@ class UiSettings:
     dark_theme: bool = True
     width: int = 1200
     height: int = 760
+    language: str = ""
+    # Hide categories that carry no tag of the chosen language.
+    language_strict: bool = True
 
 
 @dataclass(slots=True)
@@ -26,6 +30,8 @@ class AppConfig:
     ui: UiSettings = field(default_factory=UiSettings)
     successful_history: list[Credentials] = field(default_factory=list)
     last_input: Credentials | None = None
+    # Working accounts from the last bulk check, restored on startup.
+    working_accounts: list[BulkResult] = field(default_factory=list)
 
 
 class ConfigStore:
@@ -75,8 +81,40 @@ class ConfigStore:
             dark_theme=bool(ui_payload.get("dark_theme", True)),
             width=int(ui_payload.get("width", 1200)),
             height=int(ui_payload.get("height", 760)),
+            language=str(ui_payload.get("language", "")),
+            language_strict=bool(ui_payload.get("language_strict", True)),
         )
-        return AppConfig(ui=ui, successful_history=history, last_input=last_input)
+        working_accounts = [
+            BulkResult(
+                line_number=int(row.get("line_number", 0)),
+                raw=str(row.get("raw", "")),
+                base_url=str(row.get("base_url", "")),
+                username=str(row.get("username", "")),
+                password=str(row.get("password", "")),
+                portal_type=str(row.get("portal_type", PortalType.XTREAM.value)),
+                mac_address=str(row.get("mac_address", "")),
+                ok=bool(row.get("ok", True)),
+                status=str(row.get("status", "")),
+                expiry=str(row.get("expiry", "")),
+                max_connections=str(row.get("max_connections", "")),
+                active_connections=str(row.get("active_connections", "")),
+                timezone=str(row.get("timezone", "")),
+                real_url=str(row.get("real_url", "")),
+                starred=bool(row.get("starred", False)),
+                stream_ok=row.get("stream_ok") if isinstance(row.get("stream_ok"), bool) else None,
+                stream_status=str(row.get("stream_status", "")),
+                stream_checked_at=str(row.get("stream_checked_at", "")),
+                stream_down_since=str(row.get("stream_down_since", "")),
+            )
+            for row in payload.get("working_accounts", [])
+            if isinstance(row, dict)
+        ]
+        return AppConfig(
+            ui=ui,
+            successful_history=history,
+            last_input=last_input,
+            working_accounts=working_accounts,
+        )
 
     def save(self, config: AppConfig) -> None:
         """Safely write config to disk."""

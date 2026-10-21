@@ -6,6 +6,7 @@ import sys
 import os
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlparse
 
 # Set Windows AppUserModelID BEFORE any UI initialization (must be before QApplication)
 if sys.platform == 'win32':
@@ -28,8 +29,10 @@ import qdarkstyle
 
 from zone_new_companion.config import ConfigStore
 from zone_new_companion.controllers.app_controller import AppController
+from zone_new_companion.services.bulk_checker import BulkResult, friendly_error, is_server_unavailable
 from zone_new_companion.logging_config import configure_logging
-from zone_new_companion.models import MediaItem, PlaylistCategory
+from zone_new_companion.services.filter_debug import DEBUG_DIR, debug_enabled
+from zone_new_companion.models import Credentials, MediaItem, PlaylistCategory
 from zone_new_companion.state import StateStore
 from zone_new_companion.ui.main_window import MainWindow
 from zone_new_companion.ui.widgets.bulk_check_dialog import BulkCheckDialog
@@ -39,7 +42,7 @@ from zone_new_companion import __version__
 def run() -> None:
     """Start the GUI application."""
     app_data = Path.home() / ".zone-new-companion"
-    configure_logging(app_data / "logs")
+    configure_logging(app_data / "logs", debug=debug_enabled())
 
     config_store = ConfigStore(app_data / "config.json")
     state_store = StateStore()
@@ -72,13 +75,7 @@ def run() -> None:
         QMessageBox.critical(window, "Error", message)
 
     state_store.state_changed.connect(window.apply_state)
-    window.connect_requested.connect(
-        lambda credentials: controller.connect(
-            credentials,
-            on_success=lambda message: _on_connect_success(window, controller, message),
-            on_error=on_error,
-        ),
-    )
+    window.add_account_requested.connect(lambda credentials: _add_account(window, controller, credentials, on_error))
     window.category_selected.connect(
         lambda tab_name, category: _load_category(controller, tab_name, category, on_error, window.notify),
     )
@@ -91,6 +88,14 @@ def run() -> None:
     window.verify_item_requested.connect(
         lambda tab_name, item: controller.verify_single_item(tab_name, item, on_success=window.notify, on_error=on_error),
     )
+    window.hls_play_requested.connect(
+        lambda item: controller.play(item, on_success=window.notify, on_error=on_error, prefer_hls=True),
+    )
+    window.hls_probe_requested.connect(
+        lambda item: controller.probe_hls(
+            item, on_result=lambda hls_url: window.show_hls_result(item.name, hls_url), on_error=on_error,
+        ),
+    )
     window.verify_all_channels_requested.connect(
         lambda tab_name: controller.verify_all_channels(tab_name, on_success=window.notify, on_error=on_error),
     )
@@ -101,7 +106,6 @@ def run() -> None:
         lambda: controller.cancel_verification(on_success=window.notify, on_error=on_error),
     )
     window.now_playing_requested.connect(lambda tab_name, item: controller.request_now_playing(tab_name, item))
-    window.reset_requested.connect(lambda: _reset(window, controller))
     window.bulk_check_requested.connect(lambda: _open_bulk_check(window, controller, on_error))
     window.working_account_selected.connect(
         lambda result: controller.connect_from_bulk(
@@ -110,6 +114,26 @@ def run() -> None:
             on_error=on_error,
         ),
     )
+
+    window.working_accounts_clear_requested.connect(
+        lambda: _show_working_accounts(window, controller, []),
+    )
+    window.working_account_remove_requested.connect(
+        lambda result: window.show_working_accounts(controller.remove_working_accounts([result]), announce=False),
+    )
+    window.working_account_star_toggled.connect(
+        lambda result: window.show_working_accounts(controller.toggle_working_account_star(result), announce=False),
+    )
+    window.working_accounts_recheck_requested.connect(lambda: _recheck_working_accounts(window, controller, on_error))
+    window.show_working_accounts(controller.working_accounts(), announce=False)
+
+    window.set_language(controller.config.ui.language)
+    window.language_changed.connect(controller.set_language)
+    window.set_language_strict(controller.config.ui.language_strict)
+    window.language_strict_changed.connect(controller.set_language_strict)
+    if controller.debug_enabled:
+        window.enable_debug_menu(str(DEBUG_DIR))
+        window.debug_dump_requested.connect(lambda: controller.dump_full_catalog(window.notify, on_error))
 
     if controller.config.last_input:
         window.populate_form(controller.config.last_input)
@@ -174,17 +198,144 @@ def _open_bulk_check(
     dialog = BulkCheckDialog(controller, parent=window)
     # The dialog hands back every working account; the main window renders them
     # as a pickable list and each click loads that account's streams.
-    dialog.accounts_chosen.connect(window.show_working_accounts)
+    dialog.accounts_chosen.connect(
+        lambda results: window.show_working_accounts(controller.merge_working_accounts(results)),
+    )
     # Make sure a running check is cancelled if the dialog is dismissed.
     dialog.finished.connect(lambda _code: controller.cancel_bulk_check())
     dialog.exec()
 
 
-def _reset(window: MainWindow, controller: AppController) -> None:
-    controller.reset_form()
+def _add_account(
+    window: MainWindow,
+    controller: AppController,
+    credentials: Credentials,
+    on_error: Callable[[str], None],
+) -> None:
+    """Check one typed-in account, add it to the list and browse it."""
+    signals = controller.check_new_account(credentials)
+    if isinstance(signals, str):
+        on_error(signals)
+        return
+    window.login_panel.set_checking(True)
+    signals.succeeded.connect(lambda results: _finish_add(window, controller, results, on_error))
+    signals.failed.connect(on_error)
+    signals.finished.connect(lambda: window.login_panel.set_checking(False))
+    # Keep the signals object alive until the check reports back.
+    window._add_signals = signals
+
+
+def _finish_add(
+    window: MainWindow,
+    controller: AppController,
+    results: list,
+    on_error: Callable[[str], None],
+) -> None:
+    result: BulkResult = results[0]
+    kind = result.portal_type.upper()
+    if not result.ok:
+        reason = friendly_error(result.error)
+        if is_server_unavailable(result):
+            text = f"The {kind} server is unreachable right now ({reason})."
+        else:
+            text = f"The {kind} account did not log in: {reason}."
+        answer = QMessageBox.question(
+            window,
+            "Account not working",
+            f"{text}\n\nAdd it to the list anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+    accounts = controller.add_working_account(result)
+    window.show_working_accounts(accounts, announce=False, select=result)
     window.login_panel.clear()
-    _refresh_history_menu(window, controller)
-    window.notify("Form reset")
+    if not result.ok:
+        window.notify(f"{kind} account added (not working right now)")
+        return
+    streaming = "and streaming" if result.stream_ok else "but not streaming"
+    window.notify(f"{kind} account added — logs in {streaming}")
+    controller.connect_from_bulk(
+        result,
+        on_success=lambda message: _on_connect_success(window, controller, message),
+        on_error=on_error,
+    )
+
+
+def _show_working_accounts(window: MainWindow, controller: AppController, results: list) -> None:
+    controller.save_working_accounts(results)
+    window.show_working_accounts(results)
+
+
+def _recheck_working_accounts(
+    window: MainWindow,
+    controller: AppController,
+    on_error: Callable[[str], None],
+) -> None:
+    if not controller.working_accounts():
+        return
+    window.set_recheck_running(True)
+    signals = controller.recheck_working_accounts()
+    signals.progress.connect(
+        lambda _result, done, total: window.set_recheck_running(True, f"Rechecking {done}/{total}…"),
+    )
+    signals.succeeded.connect(lambda results: _finish_recheck(window, controller, results))
+    signals.failed.connect(on_error)
+    signals.finished.connect(lambda: window.set_recheck_running(False))
+    # Keep the signals object alive until the run reports back.
+    window._recheck_signals = signals
+
+
+def _finish_recheck(window: MainWindow, controller: AppController, results: list) -> None:
+    dead = controller.apply_recheck(results)
+    accounts = controller.working_accounts()
+    window.show_working_accounts(accounts, announce=False)
+    not_streaming = sum(1 for account in accounts if account.stream_ok is False)
+    if not dead:
+        if not_streaming:
+            window.notify(f"{not_streaming} account(s) can't stream right now - kept in the list (red)")
+        else:
+            window.notify("All working accounts log in and stream")
+        return
+    # Group by provider: dead accounts almost always fail together per server.
+    by_provider: dict[str, list] = {}
+    for account in dead:
+        provider = urlparse(account.base_url).hostname or account.base_url
+        by_provider.setdefault(provider, []).append(account)
+    summary = []
+    for provider, group in sorted(by_provider.items(), key=lambda item: -len(item[1])):
+        reasons = sorted({friendly_error(account.error) for account in group})
+        count = f"{len(group)} account{'s' if len(group) != 1 else ''}"
+        summary.append(f"•  {provider}  ({count}) — {', '.join(reasons)}")
+    details = [
+        f"{'★ ' if account.starred else ''}{account.portal_type.upper()} "
+        f"{account.username or account.mac_address or 'playlist'} @ {urlparse(account.base_url).hostname}: "
+        f"{account.error or 'not working'}"
+        for account in dead
+    ]
+    starred = sum(1 for account in dead if account.starred)
+    box = QMessageBox(window)
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setWindowTitle("Remove non-working accounts?")
+    box.setText(f"The server rejected {len(dead)} account{'s' if len(dead) != 1 else ''}.")
+    box.setInformativeText(
+        "\n".join(summary)
+        + (f"\n\n{starred} of them {'is' if starred == 1 else 'are'} starred." if starred else "")
+        + (
+            "\n\nAccounts whose server is only unreachable stay in the list (red)."
+            if not_streaming > len(dead)
+            else ""
+        )
+        + "\n\nRemove them from the list?",
+    )
+    box.setDetailedText("\n".join(details))
+    box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+    box.setDefaultButton(QMessageBox.StandardButton.No)
+    answer = box.exec()
+    if answer == QMessageBox.StandardButton.Yes:
+        window.show_working_accounts(controller.remove_working_accounts(dead), announce=False)
+        window.notify(f"Removed {len(dead)} non-working account(s)")
 
 
 def _on_connect_success(window: MainWindow, controller: AppController, message: str) -> None:

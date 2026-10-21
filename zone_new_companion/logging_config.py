@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 
 
-def configure_logging(log_dir: Path) -> None:
+def configure_logging(log_dir: Path, debug: bool = False) -> None:
     """Configure root logging handlers."""
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "zone-new-companion.log"
@@ -23,6 +23,8 @@ def configure_logging(log_dir: Path) -> None:
 
     root_logger = logging.getLogger()
     root_logger.handlers.clear()
-    root_logger.setLevel(logging.INFO)
+    root_logger.setLevel(logging.DEBUG if debug else logging.INFO)
+    # urllib3 logs each request URL, and Xtream URLs carry username/password.
+    logging.getLogger("urllib3").setLevel(logging.INFO)
     root_logger.addHandler(file_handler)
     root_logger.addHandler(stream_handler)

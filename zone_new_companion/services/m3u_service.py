@@ -133,8 +133,8 @@ class M3UService(PortalService):
         return response.text
 
     def _parse_categories(self, content: str) -> list[PlaylistCategory]:
-        """Parse categories from M3U content and sort alphabetically."""
-        categories = set()
+        """Parse categories from M3U content in playlist order."""
+        categories: dict[str, None] = {}
         lines = content.split('\n')
         
         for line in lines:
@@ -143,21 +143,19 @@ class M3UService(PortalService):
                 # Extract category from group-title attribute
                 match = re.search(r'group-title="([^"]*)"', line)
                 if match:
-                    categories.add(match.group(1))
+                    categories.setdefault(match.group(1))
         
-        # Sort categories alphabetically and convert to PlaylistCategory objects
-        sorted_categories = sorted(categories, key=lambda x: x.lower())
         return [
             PlaylistCategory(
                 id=str(i),
                 name=category if category else "Uncategorized",
                 media_kind="live"
             )
-            for i, category in enumerate(sorted_categories)
+            for i, category in enumerate(categories)
         ]
 
     def _parse_category_items(self, content: str, category_id: str) -> list[MediaItem]:
-        """Parse items for a specific category from M3U content and sort alphabetically."""
+        """Parse items for a specific category from M3U content in playlist order."""
         items = []
         lines = content.split('\n')
         i = 0
@@ -190,10 +188,9 @@ class M3UService(PortalService):
                                 name=name,
                                 media_kind="live",
                                 item_type="channel",
+                                metadata={"category_id": category_id},
                                 stream_url=url
                             ))
             i += 1
         
-        # Sort items alphabetically (case-insensitive)
-        sorted_items = sorted(items, key=lambda x: x.name.lower())
-        return sorted_items
+        return items
