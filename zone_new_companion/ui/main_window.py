@@ -12,7 +12,6 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFrame,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -33,10 +32,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from zone_new_companion.models import Credentials
 from zone_new_companion.services.country_filter import LANGUAGES, codes_for_language, filter_categories, filter_items
 from zone_new_companion.state import AppState
-from zone_new_companion.ui.widgets.login_panel import LoginPanel
+from zone_new_companion.ui.widgets.add_account_dialog import ACCOUNT_TYPES
 from zone_new_companion.ui.widgets.media_table import (
     NAME_COL,
     NOW_COL,
@@ -53,6 +51,7 @@ from zone_new_companion import __version__
 class MainWindow(QMainWindow):
     """Main application window."""
 
+    # Carries the PortalType to add.
     add_account_requested = pyqtSignal(object)
     category_selected = pyqtSignal(str, object)
     item_activated = pyqtSignal(str, object)
@@ -136,26 +135,73 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
-
-        # Top: a single compact row to import accounts (one, or many in bulk).
-        self.login_panel = LoginPanel()
-        self.login_panel.add_clicked.connect(self.add_account_requested.emit)
-        self.login_panel.bulk_check_clicked.connect(self.bulk_check_requested.emit)
-        import_frame = QFrame()
-        import_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        import_layout = QVBoxLayout(import_frame)
-        import_layout.setContentsMargins(0, 0, 0, 0)
-        import_layout.addWidget(self.login_panel)
-        layout.addWidget(import_frame, 0)
+        layout.setContentsMargins(12, 10, 12, 6)
 
         # Working accounts of every type, with their connection details inline;
-        # they are the main view. Clicking a row loads that account's streams
-        # into the tabs below; the splitter trades room between the two.
-        self.accounts_group = QGroupBox("Working Accounts")
+        # they are the main view. Accounts come in through the Add menu.
+        # Clicking a row loads that account's streams into the tabs below; the
+        # splitter trades room between the two.
+        # A plain panel with its own heading: a QGroupBox title is drawn onto
+        # the frame border and collides with it under the dark theme.
+        self.accounts_group = QFrame()
+        self.accounts_group.setObjectName("accountsPanel")
+        self.accounts_group.setStyleSheet("""
+            QFrame#accountsPanel {
+                border: 1px solid #455364;
+                border-radius: 4px;
+            }
+            QFrame#accountsPanel QPushButton {
+                padding: 5px 16px;
+                min-height: 18px;
+            }
+            QFrame#accountsPanel QPushButton::menu-indicator {
+                image: none;
+                width: 0px;
+            }
+        """)
         accounts_layout = QVBoxLayout(self.accounts_group)
-        accounts_layout.setContentsMargins(6, 6, 6, 6)
+        accounts_layout.setContentsMargins(12, 12, 12, 12)
+        accounts_layout.setSpacing(10)
+
+        accounts_buttons = QHBoxLayout()
+        accounts_buttons.setSpacing(8)
+        self.accounts_title = QLabel("Working Accounts")
+        self.accounts_title.setStyleSheet("font-size: 15px; font-weight: bold;")
+        accounts_buttons.addWidget(self.accounts_title)
+        self.accounts_counts = QLabel("")
+        self.accounts_counts.setStyleSheet("color: #8a8a8a;")
+        accounts_buttons.addWidget(self.accounts_counts)
+        accounts_buttons.addSpacing(16)
+        # The ▾ in the text replaces the theme's menu arrow, which sits too high.
+        self.add_account_button = QPushButton("Add  ▾")
+        self.add_account_button.setToolTip("Add an XTREAM, M3U or STALKER account, or import many XTREAM URLs")
+        add_menu = QMenu(self.add_account_button)
+        for portal, (menu_text, _title) in ACCOUNT_TYPES.items():
+            add_menu.addAction(menu_text, lambda portal=portal: self.add_account_requested.emit(portal))
+        add_menu.addSeparator()
+        add_menu.addAction("Bulk import XTREAM URLs…", self.bulk_check_requested.emit)
+        self.add_account_button.setMenu(add_menu)
+        accounts_buttons.addWidget(self.add_account_button)
+        self.recheck_accounts_button = QPushButton("Recheck")
+        self.recheck_accounts_button.setToolTip(
+            "Check which accounts (XTREAM, M3U, STALKER) still log in and can actually stream,\n"
+            "and offer to remove the ones that no longer log in",
+        )
+        self.recheck_accounts_button.clicked.connect(self.working_accounts_recheck_requested.emit)
+        accounts_buttons.addWidget(self.recheck_accounts_button)
+        accounts_buttons.addStretch(1)
+        self.remove_account_button = QPushButton("Remove")
+        self.remove_account_button.setToolTip("Remove the selected account from the list")
+        self.remove_account_button.clicked.connect(self._emit_remove_account)
+        accounts_buttons.addWidget(self.remove_account_button)
+        self.clear_accounts_button = QPushButton("Clear")
+        self.clear_accounts_button.setToolTip("Remove all saved accounts")
+        self.clear_accounts_button.clicked.connect(self._confirm_clear_accounts)
+        accounts_buttons.addWidget(self.clear_accounts_button)
+        accounts_layout.addLayout(accounts_buttons)
+
         self.accounts_empty_label = QLabel(
-            "No accounts yet — add one above, or paste many with Bulk Import…",
+            "No accounts yet — use Add to add an XTREAM, M3U or STALKER account.",
         )
         self.accounts_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.accounts_empty_label.setStyleSheet("color: #8a8a8a; padding: 24px;")
@@ -181,28 +227,10 @@ class MainWindow(QMainWindow):
             self.accounts_table.horizontalHeader().setSectionResizeMode(col, mode)
         self.accounts_table.cellClicked.connect(self._emit_working_account)
         accounts_layout.addWidget(self.accounts_table, 1)
-        accounts_buttons = QHBoxLayout()
-        self.recheck_accounts_button = QPushButton("Recheck")
-        self.recheck_accounts_button.setToolTip(
-            "Check which accounts (XTREAM, M3U, STALKER) still log in and can actually stream,\n"
-            "and offer to remove the ones that no longer log in",
-        )
-        self.recheck_accounts_button.clicked.connect(self.working_accounts_recheck_requested.emit)
-        accounts_buttons.addWidget(self.recheck_accounts_button)
-        accounts_buttons.addStretch(1)
-        self.remove_account_button = QPushButton("Remove")
-        self.remove_account_button.setToolTip("Remove the selected account from the list")
-        self.remove_account_button.clicked.connect(self._emit_remove_account)
-        accounts_buttons.addWidget(self.remove_account_button)
-        self.clear_accounts_button = QPushButton("Clear")
-        self.clear_accounts_button.setToolTip("Remove all saved accounts")
-        self.clear_accounts_button.clicked.connect(self._confirm_clear_accounts)
-        accounts_buttons.addWidget(self.clear_accounts_button)
-        accounts_layout.addLayout(accounts_buttons)
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setContentsMargins(0, 8, 0, 0)
 
         filter_row = QHBoxLayout()
         filter_row.addWidget(QLabel("Language:"))
@@ -308,6 +336,7 @@ class MainWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(10)
         splitter.addWidget(self.accounts_group)
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 1)
@@ -466,7 +495,7 @@ class MainWindow(QMainWindow):
         breakdown = ", ".join(
             f"{counts[key]} {label}" for key, (label, _color) in self._TYPE_BADGES.items() if counts.get(key)
         )
-        self.accounts_group.setTitle(f"Working Accounts ({breakdown})" if breakdown else "Working Accounts")
+        self.accounts_counts.setText(breakdown.replace(", ", " · "))
         self.accounts_table.setVisible(bool(results))
         self.accounts_empty_label.setVisible(not results)
         self.recheck_accounts_button.setEnabled(bool(results))
@@ -548,10 +577,6 @@ class MainWindow(QMainWindow):
     def notify(self, text: str) -> None:
         """Show toast notification."""
         self._toast.show_message(text)
-
-    def populate_form(self, credentials: Credentials) -> None:
-        """Load credentials into form."""
-        self.login_panel.populate_form(credentials)
 
     def set_history_actions(self, labels: list[str]) -> None:
         """Populate top menu history actions."""

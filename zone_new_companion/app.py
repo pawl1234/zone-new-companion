@@ -32,9 +32,10 @@ from zone_new_companion.controllers.app_controller import AppController
 from zone_new_companion.services.bulk_checker import BulkResult, friendly_error, is_server_unavailable
 from zone_new_companion.logging_config import configure_logging
 from zone_new_companion.services.filter_debug import DEBUG_DIR, debug_enabled
-from zone_new_companion.models import Credentials, MediaItem, PlaylistCategory
+from zone_new_companion.models import Credentials, MediaItem, PlaylistCategory, PortalType
 from zone_new_companion.state import StateStore
 from zone_new_companion.ui.main_window import MainWindow
+from zone_new_companion.ui.widgets.add_account_dialog import AddAccountDialog
 from zone_new_companion.ui.widgets.bulk_check_dialog import BulkCheckDialog
 from zone_new_companion import __version__
 
@@ -75,7 +76,9 @@ def run() -> None:
         QMessageBox.critical(window, "Error", message)
 
     state_store.state_changed.connect(window.apply_state)
-    window.add_account_requested.connect(lambda credentials: _add_account(window, controller, credentials, on_error))
+    window.add_account_requested.connect(
+        lambda portal: _open_add_account(window, controller, portal, controller.config.last_input, on_error),
+    )
     window.category_selected.connect(
         lambda tab_name, category: _load_category(controller, tab_name, category, on_error, window.notify),
     )
@@ -83,7 +86,7 @@ def run() -> None:
         lambda tab_name, item: _activate_item(controller, tab_name, item, on_error, window.notify),
     )
     window.back_requested.connect(lambda tab_name: _go_back(controller, tab_name, window.notify, on_error))
-    window.history_selected.connect(lambda index: _pick_history(window, controller, index))
+    window.history_selected.connect(lambda index: _pick_history(window, controller, index, on_error))
     window.history_clear_requested.connect(lambda: _clear_history(window, controller))
     window.verify_item_requested.connect(
         lambda tab_name, item: controller.verify_single_item(tab_name, item, on_success=window.notify, on_error=on_error),
@@ -135,9 +138,6 @@ def run() -> None:
         window.enable_debug_menu(str(DEBUG_DIR))
         window.debug_dump_requested.connect(lambda: controller.dump_full_catalog(window.notify, on_error))
 
-    if controller.config.last_input:
-        window.populate_form(controller.config.last_input)
-
     qt_app.aboutToQuit.connect(lambda: controller.save_ui_state(window.width(), window.height()))
     
     # Show as normal window with controls (not fullscreen) - ensures minimize/maximize/close buttons
@@ -183,11 +183,15 @@ def _go_back(
         on_error("No previous list for this tab.")
 
 
-def _pick_history(window: MainWindow, controller: AppController, index: int) -> None:
+def _pick_history(
+    window: MainWindow,
+    controller: AppController,
+    index: int,
+    on_error: Callable[[str], None],
+) -> None:
     history = controller.history_entries()
     if 0 <= index < len(history):
-        window.populate_form(history[index])
-        window.notify("Loaded credentials from history")
+        _open_add_account(window, controller, history[index].portal_type, history[index], on_error)
 
 
 def _open_bulk_check(
@@ -206,31 +210,56 @@ def _open_bulk_check(
     dialog.exec()
 
 
+def _open_add_account(
+    window: MainWindow,
+    controller: AppController,
+    portal: PortalType,
+    prefill: Credentials | None,
+    on_error: Callable[[str], None],
+) -> None:
+    """Ask for one account of the chosen type; it stays open while it is checked."""
+    dialog = AddAccountDialog(portal, prefill, parent=window)
+    dialog.submitted.connect(lambda credentials: _add_account(window, controller, dialog, credentials, on_error))
+    dialog.exec()
+
+
 def _add_account(
     window: MainWindow,
     controller: AppController,
+    dialog: AddAccountDialog,
     credentials: Credentials,
     on_error: Callable[[str], None],
 ) -> None:
     """Check one typed-in account, add it to the list and browse it."""
     signals = controller.check_new_account(credentials)
     if isinstance(signals, str):
-        on_error(signals)
+        QMessageBox.warning(dialog, "Check the input", signals)
         return
-    window.login_panel.set_checking(True)
-    signals.succeeded.connect(lambda results: _finish_add(window, controller, results, on_error))
+    dialog.set_checking(True)
+    running = [True]
+
+    def on_finished() -> None:
+        running[0] = False
+        dialog.set_checking(False)
+
+    signals.succeeded.connect(lambda results: _finish_add(window, controller, dialog, results, on_error))
     signals.failed.connect(on_error)
-    signals.finished.connect(lambda: window.login_panel.set_checking(False))
+    signals.finished.connect(on_finished)
+    # Closing the dialog abandons a check that is still running.
+    dialog.rejected.connect(lambda: running[0] and controller.cancel_bulk_check())
     # Keep the signals object alive until the check reports back.
-    window._add_signals = signals
+    dialog._signals = signals
 
 
 def _finish_add(
     window: MainWindow,
     controller: AppController,
+    dialog: AddAccountDialog,
     results: list,
     on_error: Callable[[str], None],
 ) -> None:
+    if not dialog.isVisible():
+        return
     result: BulkResult = results[0]
     kind = result.portal_type.upper()
     if not result.ok:
@@ -240,7 +269,7 @@ def _finish_add(
         else:
             text = f"The {kind} account did not log in: {reason}."
         answer = QMessageBox.question(
-            window,
+            dialog,
             "Account not working",
             f"{text}\n\nAdd it to the list anyway?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -248,9 +277,9 @@ def _finish_add(
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+    dialog.accept()
     accounts = controller.add_working_account(result)
     window.show_working_accounts(accounts, announce=False, select=result)
-    window.login_panel.clear()
     if not result.ok:
         window.notify(f"{kind} account added (not working right now)")
         return
