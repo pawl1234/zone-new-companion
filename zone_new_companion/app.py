@@ -25,7 +25,6 @@ else:
 from PyQt6.QtWidgets import QApplication, QMessageBox
 from PyQt6.QtGui import QIcon
 from PyQt6.QtCore import Qt
-import qdarkstyle
 
 from zone_new_companion.config import ConfigStore
 from zone_new_companion.controllers.app_controller import AppController
@@ -35,6 +34,7 @@ from zone_new_companion.services.filter_debug import DEBUG_DIR, debug_enabled
 from zone_new_companion.models import Credentials, MediaItem, PlaylistCategory, PortalType
 from zone_new_companion.state import StateStore
 from zone_new_companion.ui.main_window import MainWindow
+from zone_new_companion.ui.theme import theme
 from zone_new_companion.ui.widgets.add_account_dialog import AddAccountDialog
 from zone_new_companion.ui.widgets.bulk_check_dialog import BulkCheckDialog
 from zone_new_companion import __version__
@@ -59,8 +59,7 @@ def run() -> None:
         app_icon = QIcon(icon_path)
         qt_app.setWindowIcon(app_icon)
     
-    if controller.config.ui.dark_theme:
-        qt_app.setStyleSheet(qdarkstyle.load_stylesheet(qt_api="pyqt6"))
+    theme.apply(qt_app, controller.config.ui.theme)
 
     window = MainWindow()
     
@@ -130,6 +129,8 @@ def run() -> None:
     window.working_accounts_recheck_requested.connect(lambda: _recheck_working_accounts(window, controller, on_error))
     window.show_working_accounts(controller.working_accounts(), announce=False)
 
+    window.set_theme_mode(theme.mode)
+    window.theme_mode_changed.connect(lambda mode: (theme.apply(qt_app, mode), controller.set_theme(mode)))
     window.set_language(controller.config.ui.language)
     window.language_changed.connect(controller.set_language)
     window.set_language_strict(controller.config.ui.language_strict)

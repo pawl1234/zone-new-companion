@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
 )
 
 from zone_new_companion.models import Credentials, PortalType
+from zone_new_companion.ui.theme import set_role, set_variant
 
 # Menu text and dialog title per type, in menu order.
 ACCOUNT_TYPES = {
@@ -37,7 +38,11 @@ class AddAccountDialog(QDialog):
         self.setMinimumWidth(520)
 
         root = QVBoxLayout(self)
+        root.setContentsMargins(20, 18, 20, 16)
+        root.setSpacing(14)
         form = QFormLayout()
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(10)
         root.addLayout(form)
 
         self.base_url = QLineEdit()
@@ -75,15 +80,14 @@ class AddAccountDialog(QDialog):
             self.password.setText(prefill.password)
             self.mac_address.setText(prefill.mac_address)
 
-        hint = QLabel("The account is checked (login + streaming) before it is added.")
-        hint.setStyleSheet("color: #8a8a8a;")
+        hint = set_role(QLabel("The account is checked (login + streaming) before it is added."), "muted")
         root.addWidget(hint)
 
         buttons = QHBoxLayout()
         buttons.addStretch(1)
-        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button = set_variant(QPushButton("Cancel"), "ghost")
         self.cancel_button.clicked.connect(self.reject)
-        self.add_button = QPushButton("Add")
+        self.add_button = set_variant(QPushButton("Add"), "primary")
         self.add_button.setDefault(True)
         self.add_button.clicked.connect(self._emit_credentials)
         buttons.addWidget(self.cancel_button)

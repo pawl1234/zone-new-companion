@@ -86,6 +86,7 @@ pip install -r requirements.txt
      --icon zone_new_companion\icon\icon.ico `
      --add-data "zone_new_companion\icon\icon.ico;zone_new_companion/icon" `
      --add-data "media;media" `
+     --add-data "zone_new_companion\ui\theme;zone_new_companion/ui/theme" `
      --hidden-import pytesseract `
      --hidden-import cv2 `
      --hidden-import numpy `
@@ -130,6 +131,7 @@ The icon is automatically embedded when using the `--icon` flag with PyInstaller
      --icon zone_new_companion/icon/icon.ico \
      --add-data "zone_new_companion/icon/icon.ico:zone_new_companion/icon" \
      --add-data "media:media" \
+     --add-data "zone_new_companion/ui/theme:zone_new_companion/ui/theme" \
      --hidden-import pytesseract \
      --hidden-import cv2 \
      --hidden-import numpy \
@@ -277,6 +279,7 @@ The icon is automatically embedded when using the `--icon` flag with PyInstaller
      --icon zone_new_companion/icon/icon.icns \
      --add-data "zone_new_companion/icon/icon.icns:zone_new_companion/icon" \
      --add-data "media:media" \
+     --add-data "zone_new_companion/ui/theme:zone_new_companion/ui/theme" \
      --hidden-import pytesseract \
      --hidden-import cv2 \
      --hidden-import numpy \

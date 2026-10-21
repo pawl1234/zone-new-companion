@@ -6,8 +6,8 @@ import sys
 from datetime import datetime
 from urllib.parse import urlparse
 
-from PyQt6.QtCore import QModelIndex, QSortFilterProxyModel, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPixmap
+from PyQt6.QtCore import QModelIndex, QSize, QSortFilterProxyModel, Qt, pyqtSignal
+from PyQt6.QtGui import QActionGroup, QColor, QFont, QGuiApplication, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -44,6 +44,7 @@ from zone_new_companion.ui.widgets.media_table import (
     VERIFY_COL,
     MediaTableModel,
 )
+from zone_new_companion.ui.theme import set_role, set_variant, theme
 from zone_new_companion.ui.widgets.toast import ToastLabel
 from zone_new_companion import __version__
 
@@ -75,6 +76,7 @@ class MainWindow(QMainWindow):
     language_changed = pyqtSignal(str)
     language_strict_changed = pyqtSignal(bool)
     debug_dump_requested = pyqtSignal()
+    theme_mode_changed = pyqtSignal(str)
 
     # Ordered by importance: type + provider + real URL lead, account details follow.
     # The leading star column pins an account to the top of the list.
@@ -86,12 +88,13 @@ class MainWindow(QMainWindow):
     _TYPE_COL = 1
     _STREAM_COL = 2
     _STRETCH_COLS = (3, 4)
-    # Badge text and color per PortalType value.
+    # Badge text and color token per PortalType value.
     _TYPE_BADGES = {
-        "xtream": ("XTREAM", "#4aa3ff"),
-        "m3u": ("M3U", "#ffa94d"),
-        "stalker": ("STALKER", "#c792ea"),
+        "xtream": ("XTREAM", "xtream"),
+        "m3u": ("M3U", "m3u"),
+        "stalker": ("STALKER", "stalker"),
     }
+    _TAB_ICONS = {"Live": "tv", "Movies": "film", "Series": "layers"}
 
     def __init__(self) -> None:
         super().__init__()
@@ -100,27 +103,44 @@ class MainWindow(QMainWindow):
         self._help_menu = QMenu("Help", self)
         self._history_menu = QMenu("History", self)
         self._verify_menu = QMenu("Verify", self)
+        self._view_menu = QMenu("View", self)
         self.menuBar().addMenu(self._help_menu)
         self.menuBar().addMenu(self._verify_menu)
         self.menuBar().addMenu(self._history_menu)
+        self.menuBar().addMenu(self._view_menu)
+
+        theme_menu = self._view_menu.addMenu("Theme")
+        self._theme_actions = QActionGroup(self)
+        for mode, label in (("system", "Match system"), ("light", "Light"), ("dark", "Dark")):
+            action = theme_menu.addAction(label)
+            action.setCheckable(True)
+            action.setData(mode)
+            self._theme_actions.addAction(action)
+        self._theme_actions.triggered.connect(lambda action: self.theme_mode_changed.emit(action.data()))
 
         self._help_info_action = self._help_menu.addAction("Info")
+        theme.bind_icon(self._help_info_action, "info")
         self._help_exit_action = self._help_menu.addAction("Exit")
+        theme.bind_icon(self._help_exit_action, "log-out")
         self._help_exit_action.triggered.connect(self.close)
 
         # Verify menu actions
         self._verify_cancel_action = self._verify_menu.addAction("Cancel Verification")
+        theme.bind_icon(self._verify_cancel_action, "circle-stop")
         self._verify_cancel_action.triggered.connect(self._emit_cancel_verification)
         
         self._verify_menu.addSeparator()
         
         self._verify_live_action = self._verify_menu.addAction("Verify Live")
+        theme.bind_icon(self._verify_live_action, "tv")
         self._verify_live_action.triggered.connect(lambda: self._emit_verify_tab("Live"))
         
         self._verify_movies_action = self._verify_menu.addAction("Verify Movies")
+        theme.bind_icon(self._verify_movies_action, "film")
         self._verify_movies_action.triggered.connect(lambda: self._emit_verify_tab("Movies"))
         
         self._verify_series_action = self._verify_menu.addAction("Verify Series")
+        theme.bind_icon(self._verify_series_action, "layers")
         self._verify_series_action.triggered.connect(lambda: self._emit_verify_tab("Series"))
 
         # Logs functionality completely removed
@@ -135,7 +155,7 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
-        layout.setContentsMargins(12, 10, 12, 6)
+        layout.setContentsMargins(16, 14, 16, 8)
 
         # Working accounts of every type, with their connection details inline;
         # they are the main view. Accounts come in through the Add menu.
@@ -143,46 +163,33 @@ class MainWindow(QMainWindow):
         # splitter trades room between the two.
         # A plain panel with its own heading: a QGroupBox title is drawn onto
         # the frame border and collides with it under the dark theme.
-        self.accounts_group = QFrame()
-        self.accounts_group.setObjectName("accountsPanel")
-        self.accounts_group.setStyleSheet("""
-            QFrame#accountsPanel {
-                border: 1px solid #455364;
-                border-radius: 4px;
-            }
-            QFrame#accountsPanel QPushButton {
-                padding: 5px 16px;
-                min-height: 18px;
-            }
-            QFrame#accountsPanel QPushButton::menu-indicator {
-                image: none;
-                width: 0px;
-            }
-        """)
+        self.accounts_group = set_role(QFrame(), "card")
         accounts_layout = QVBoxLayout(self.accounts_group)
-        accounts_layout.setContentsMargins(12, 12, 12, 12)
+        accounts_layout.setContentsMargins(16, 14, 16, 8)
         accounts_layout.setSpacing(10)
 
         accounts_buttons = QHBoxLayout()
         accounts_buttons.setSpacing(8)
-        self.accounts_title = QLabel("Working Accounts")
-        self.accounts_title.setStyleSheet("font-size: 15px; font-weight: bold;")
+        self.accounts_title = set_role(QLabel("Working Accounts"), "title")
         accounts_buttons.addWidget(self.accounts_title)
-        self.accounts_counts = QLabel("")
-        self.accounts_counts.setStyleSheet("color: #8a8a8a;")
+        self.accounts_counts = set_role(QLabel(""), "pill")
+        self.accounts_counts.hide()
         accounts_buttons.addWidget(self.accounts_counts)
         accounts_buttons.addSpacing(16)
-        # The ▾ in the text replaces the theme's menu arrow, which sits too high.
-        self.add_account_button = QPushButton("Add  ▾")
+        self.add_account_button = set_variant(QPushButton("Add"), "primary")
+        self.add_account_button.setProperty("hasMenu", True)
+        theme.bind_icon(self.add_account_button, "plus", "on_accent")
         self.add_account_button.setToolTip("Add an XTREAM, M3U or STALKER account, or import many XTREAM URLs")
         add_menu = QMenu(self.add_account_button)
         for portal, (menu_text, _title) in ACCOUNT_TYPES.items():
             add_menu.addAction(menu_text, lambda portal=portal: self.add_account_requested.emit(portal))
         add_menu.addSeparator()
-        add_menu.addAction("Bulk import XTREAM URLs…", self.bulk_check_requested.emit)
+        bulk_action = add_menu.addAction("Bulk import XTREAM URLs…", self.bulk_check_requested.emit)
+        theme.bind_icon(bulk_action, "list-plus")
         self.add_account_button.setMenu(add_menu)
         accounts_buttons.addWidget(self.add_account_button)
         self.recheck_accounts_button = QPushButton("Recheck")
+        theme.bind_icon(self.recheck_accounts_button, "refresh-cw")
         self.recheck_accounts_button.setToolTip(
             "Check which accounts (XTREAM, M3U, STALKER) still log in and can actually stream,\n"
             "and offer to remove the ones that no longer log in",
@@ -190,11 +197,13 @@ class MainWindow(QMainWindow):
         self.recheck_accounts_button.clicked.connect(self.working_accounts_recheck_requested.emit)
         accounts_buttons.addWidget(self.recheck_accounts_button)
         accounts_buttons.addStretch(1)
-        self.remove_account_button = QPushButton("Remove")
+        self.remove_account_button = set_variant(QPushButton("Remove"), "ghost")
+        theme.bind_icon(self.remove_account_button, "x")
         self.remove_account_button.setToolTip("Remove the selected account from the list")
         self.remove_account_button.clicked.connect(self._emit_remove_account)
         accounts_buttons.addWidget(self.remove_account_button)
-        self.clear_accounts_button = QPushButton("Clear")
+        self.clear_accounts_button = set_variant(QPushButton("Clear"), "danger")
+        theme.bind_icon(self.clear_accounts_button, "trash-2", "danger")
         self.clear_accounts_button.setToolTip("Remove all saved accounts")
         self.clear_accounts_button.clicked.connect(self._confirm_clear_accounts)
         accounts_buttons.addWidget(self.clear_accounts_button)
@@ -204,7 +213,7 @@ class MainWindow(QMainWindow):
             "No accounts yet — use Add to add an XTREAM, M3U or STALKER account.",
         )
         self.accounts_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.accounts_empty_label.setStyleSheet("color: #8a8a8a; padding: 24px;")
+        set_role(self.accounts_empty_label, "empty")
         accounts_layout.addWidget(self.accounts_empty_label, 1)
         self.accounts_table = QTableWidget()
         self.accounts_table.setToolTip(
@@ -214,6 +223,9 @@ class MainWindow(QMainWindow):
         self.accounts_table.setColumnCount(len(self._ACCOUNT_COLUMNS))
         self.accounts_table.setHorizontalHeaderLabels(self._ACCOUNT_COLUMNS)
         self.accounts_table.verticalHeader().setVisible(False)
+        self.accounts_table.verticalHeader().setDefaultSectionSize(36)
+        self.accounts_table.setShowGrid(False)
+        self.accounts_table.setIconSize(QSize(14, 14))
         self.accounts_table.setAlternatingRowColors(True)
         self.accounts_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.accounts_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -230,10 +242,11 @@ class MainWindow(QMainWindow):
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 8, 0, 0)
+        right_layout.setContentsMargins(0, 6, 0, 0)
 
         filter_row = QHBoxLayout()
-        filter_row.addWidget(QLabel("Language:"))
+        filter_row.setSpacing(10)
+        filter_row.addWidget(set_role(QLabel("Language"), "muted"))
         self.language_combo = QComboBox()
         self.language_combo.addItem("All languages", "")
         for key, (label, _codes) in LANGUAGES.items():
@@ -274,6 +287,8 @@ class MainWindow(QMainWindow):
         for tab_name in ("Live", "Movies", "Series"):
             tab = QWidget()
             tab_layout = QHBoxLayout(tab)
+            tab_layout.setContentsMargins(0, 0, 0, 0)
+            tab_layout.setSpacing(12)
             categories = QListWidget()
             categories.setToolTip("Categories - Click to load channels/movies/series")
             categories.setAlternatingRowColors(True)
@@ -296,24 +311,11 @@ class MainWindow(QMainWindow):
             header.setSectionResizeMode(NOW_COL, QHeaderView.ResizeMode.Stretch)
             table.verticalHeader().setVisible(False)
             table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-            table.verticalHeader().setDefaultSectionSize(30)
+            table.verticalHeader().setDefaultSectionSize(34)
             table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
             table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
-            table.setShowGrid(True)
-            table.setStyleSheet("""
-                QTableView {
-                    gridline-color: #444444;
-                    background-color: #2b2b2b;
-                    alternate-background-color: #323232;
-                }
-                QTableView::item {
-                    padding: 5px;
-                    border-bottom: 1px solid #444444;
-                }
-                QTableView::item:selected {
-                    background-color: #0078d4;
-                }
-            """)
+            table.setShowGrid(False)
+            table.setIconSize(QSize(14, 14))
             table.setSelectionMode(QTableView.SelectionMode.SingleSelection)
             table.clicked.connect(lambda index, name=tab_name: self._on_item_clicked(name, index))
             table.doubleClicked.connect(lambda index, name=tab_name: self._on_item_double_clicked(name, index))
@@ -346,29 +348,36 @@ class MainWindow(QMainWindow):
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
-        self.progress.setMinimumHeight(25)  # Increase height for better visibility
-        self.progress.setMinimumWidth(300)  # Increase width for better visibility
-        self.progress.setStyleSheet("""
-            QProgressBar {
-                border: 1px solid #555;
-                border-radius: 3px;
-                text-align: center;
-                font-weight: bold;
-                background-color: #2a2a2a;
-                color: white;
-            }
-            QProgressBar::chunk {
-                background-color: #4CAF50;
-                border-radius: 2px;
-            }
-        """)
-        self.progress.setMaximumWidth(360)
+        self.progress.setFixedWidth(320)
         self.progress.hide()
         self.status_label = QLabel("Ready")
         status = QStatusBar()
         status.addPermanentWidget(self.status_label, 1)
         status.addPermanentWidget(self.progress)
         self.setStatusBar(status)
+
+        self._account_results: list = []
+        self._apply_theme_icons()
+        theme.changed.connect(self._on_theme_changed)
+
+    def set_theme_mode(self, mode: str) -> None:
+        """Tick the View → Theme entry without emitting theme_mode_changed."""
+        for action in self._theme_actions.actions():
+            action.setChecked(action.data() == mode)
+
+    def _apply_theme_icons(self) -> None:
+        for index in range(self.tab_widget.count()):
+            self.tab_widget.setTabIcon(index, theme.icon(self._TAB_ICONS[self.tab_widget.tabText(index)]))
+
+    def _on_theme_changed(self) -> None:
+        """Repaint what carries theme colors outside the stylesheet."""
+        self._apply_theme_icons()
+        for model in self._item_models.values():
+            model.refresh()
+        selected = self.accounts_table.currentRow()
+        self.show_working_accounts(self._account_results, announce=False)
+        if selected >= 0:
+            self.accounts_table.selectRow(selected)
 
     def _confirm_clear_accounts(self) -> None:
         if self.accounts_table.rowCount() == 0:
@@ -452,6 +461,7 @@ class MainWindow(QMainWindow):
 
     def show_working_accounts(self, results: list, announce: bool = True, select=None) -> None:
         """Render the accounts (with details); ``select`` picks the row to highlight."""
+        self._account_results = list(results)
         self.accounts_table.setRowCount(0)
         selected_row = 0
         for result in results:
@@ -465,7 +475,7 @@ class MainWindow(QMainWindow):
                 if result.active_connections or result.max_connections else ""
             )
             values = [
-                "★" if result.starred else "☆",
+                "",
                 "",
                 "",
                 provider,
@@ -482,8 +492,10 @@ class MainWindow(QMainWindow):
                     cell.setData(Qt.ItemDataRole.UserRole, result)
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                     cell.setToolTip("Unstar" if result.starred else "Star - keep at the top")
-                    if result.starred:
-                        cell.setForeground(QColor("#f5c518"))
+                    cell.setIcon(
+                        theme.icon("star", "star", filled=True) if result.starred
+                        else theme.icon("star", "text_disabled"),
+                    )
                 elif col == self._TYPE_COL:
                     self._fill_type_cell(cell, result.portal_type)
                 elif col == self._STREAM_COL:
@@ -492,10 +504,11 @@ class MainWindow(QMainWindow):
         counts: dict[str, int] = {}
         for result in results:
             counts[result.portal_type] = counts.get(result.portal_type, 0) + 1
-        breakdown = ", ".join(
-            f"{counts[key]} {label}" for key, (label, _color) in self._TYPE_BADGES.items() if counts.get(key)
+        breakdown = " · ".join(
+            f"{counts[key]} {label}" for key, (label, _token) in self._TYPE_BADGES.items() if counts.get(key)
         )
-        self.accounts_counts.setText(breakdown.replace(", ", " · "))
+        self.accounts_counts.setText(breakdown)
+        self.accounts_counts.setVisible(bool(breakdown))
         self.accounts_table.setVisible(bool(results))
         self.accounts_empty_label.setVisible(not results)
         self.recheck_accounts_button.setEnabled(bool(results))
@@ -510,24 +523,28 @@ class MainWindow(QMainWindow):
     @classmethod
     def _fill_type_cell(cls, cell: QTableWidgetItem, portal_type: str) -> None:
         """Colored badge text for the account's kind."""
-        label, color = cls._TYPE_BADGES.get(portal_type, (portal_type.upper(), "#8a8a8a"))
+        label, token = cls._TYPE_BADGES.get(portal_type, (portal_type.upper(), "text_muted"))
         cell.setText(label)
         cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        cell.setForeground(QColor(color))
+        cell.setForeground(theme.color(token))
         font = cell.font()
-        font.setBold(True)
+        font.setWeight(QFont.Weight.DemiBold)
         cell.setFont(font)
 
     @staticmethod
-    def _light_icon(color: str) -> QIcon:
+    def _light_icon(color: QColor) -> QIcon:
         """A round status light; as an icon it keeps its color on selected rows."""
         pixmap = QPixmap(14, 14)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QColor("#00000060"))
-        painter.setBrush(QColor(color))
-        painter.drawEllipse(1, 1, 12, 12)
+        painter.setPen(Qt.PenStyle.NoPen)
+        halo = QColor(color)
+        halo.setAlphaF(0.25)
+        painter.setBrush(halo)
+        painter.drawEllipse(0, 0, 14, 14)
+        painter.setBrush(color)
+        painter.drawEllipse(3, 3, 8, 8)
         painter.end()
         return QIcon(pixmap)
 
@@ -535,26 +552,26 @@ class MainWindow(QMainWindow):
     def _fill_stream_cell(cell: QTableWidgetItem, result) -> None:
         """Green/red light for whether the account's streams currently play."""
         if result.stream_ok is None:
-            text, color = "Not checked", "#8a8a8a"
+            text, color = "Not checked", theme.color("text_muted")
             tip = "Streaming not tested yet - press Recheck"
         elif result.stream_ok:
-            text, color = "Streaming", "#2ecc40"
+            text, color = "Streaming", theme.color("success")
             tip = f"Streams working (checked {result.stream_checked_at})"
         else:
             since = result.stream_down_since or result.stream_checked_at
             today = datetime.now().strftime("%Y-%m-%d")
             text = f"Down since {since[len(today) + 1:] if since.startswith(today) else since}"
-            color = "#ff4136"
+            color = theme.color("danger")
             tip = (
                 f"Streams not working: {result.stream_status or 'unknown'}\n"
                 f"Down since {since}, last checked {result.stream_checked_at}"
             )
         cell.setText(text)
         cell.setIcon(MainWindow._light_icon(color))
-        cell.setForeground(QColor(color))
+        cell.setForeground(color)
         cell.setToolTip(tip)
         font = cell.font()
-        font.setBold(True)
+        font.setWeight(QFont.Weight.DemiBold)
         cell.setFont(font)
 
     def _emit_working_account(self, row: int, col: int = 0) -> None:

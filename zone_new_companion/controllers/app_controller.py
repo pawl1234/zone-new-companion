@@ -973,6 +973,11 @@ class AppController:
             state.language_strict,
         )
 
+    def set_theme(self, mode: str) -> None:
+        """Persist the light/dark mode ("system", "light" or "dark")."""
+        self._config.ui.theme = mode
+        self._config_store.save(self._config)
+
     def save_ui_state(self, width: int, height: int) -> None:
         """Persist current window size."""
         self._config.ui.width = width

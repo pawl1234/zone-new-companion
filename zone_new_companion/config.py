@@ -15,7 +15,8 @@ from zone_new_companion.services.bulk_checker import BulkResult
 class UiSettings:
     """UI settings persisted between restarts."""
 
-    dark_theme: bool = True
+    # "system" follows the OS light/dark setting; else "light" or "dark".
+    theme: str = "system"
     width: int = 1200
     height: int = 760
     language: str = ""
@@ -78,7 +79,7 @@ class ConfigStore:
                 saved_at=str(last_input_payload.get("saved_at", "")),
             )
         ui = UiSettings(
-            dark_theme=bool(ui_payload.get("dark_theme", True)),
+            theme=str(ui_payload.get("theme", "system")),
             width=int(ui_payload.get("width", 1200)),
             height=int(ui_payload.get("height", 760)),
             language=str(ui_payload.get("language", "")),

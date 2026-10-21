@@ -12,7 +12,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -27,6 +26,7 @@ from PyQt6.QtWidgets import (
 )
 
 from zone_new_companion.services.bulk_checker import BulkResult, friendly_error, is_server_unavailable
+from zone_new_companion.ui.theme import set_role, set_variant, theme
 
 if TYPE_CHECKING:
     from zone_new_companion.controllers.app_controller import AppController
@@ -62,23 +62,27 @@ class BulkCheckDialog(QDialog):
         self.setMinimumSize(900, 620)
 
         root = QVBoxLayout(self)
+        root.setContentsMargins(20, 18, 20, 16)
+        root.setSpacing(10)
 
-        root.addWidget(QLabel("Paste Xtream URLs (one per line) or account blocks to check:"))
+        root.addWidget(set_role(QLabel("Paste Xtream URLs (one per line) or account blocks to check"), "section"))
         self.input_box = QPlainTextEdit()
         self.input_box.setPlaceholderText(_PLACEHOLDER)
         self.input_box.setMaximumHeight(130)
         root.addWidget(self.input_box)
 
         controls = QHBoxLayout()
-        self.check_button = QPushButton("Check All")
+        self.check_button = set_variant(QPushButton("Check All"), "primary")
+        theme.bind_icon(self.check_button, "circle-check", "on_accent")
         self.check_button.clicked.connect(self._start)
         self.stop_button = QPushButton("Stop")
+        theme.bind_icon(self.stop_button, "circle-stop")
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self._stop)
         controls.addWidget(self.check_button)
         controls.addWidget(self.stop_button)
         controls.addStretch(1)
-        self.summary_label = QLabel("")
+        self.summary_label = set_role(QLabel(""), "muted")
         controls.addWidget(self.summary_label)
         root.addLayout(controls)
 
@@ -89,14 +93,14 @@ class BulkCheckDialog(QDialog):
         root.addWidget(self.progress)
 
         # --- working accounts ---------------------------------------------
-        self.working_header = QLabel("Working accounts")
+        self.working_header = set_role(QLabel("Working accounts"), "section")
         root.addWidget(self.working_header)
         self.working_table = self._make_table(_WORKING_COLUMNS, stretch_cols=(1, 6))
         self.working_table.cellDoubleClicked.connect(lambda *_: self._browse())
         root.addWidget(self.working_table, 3)
 
         # --- server unreachable: kept, since the server may come back -------
-        self.unreachable_header = QLabel()
+        self.unreachable_header = set_role(QLabel(), "warning")
         self.unreachable_header.setToolTip(
             "The server did not answer or was overloaded - the account itself was not refused.\n"
             "These are added to Working Accounts with a red light; Recheck turns them green once the server is back.",
@@ -106,10 +110,9 @@ class BulkCheckDialog(QDialog):
         root.addWidget(self.unreachable_table, 1)
 
         # --- non-working accounts (collapsed) -----------------------------
-        self.failed_toggle = QPushButton("▶ Non-working accounts (0)")
+        self.failed_toggle = set_variant(QPushButton("Non-working accounts (0)"), "disclosure")
         self.failed_toggle.setCheckable(True)
         self.failed_toggle.setChecked(False)
-        self.failed_toggle.setStyleSheet("QPushButton { text-align: left; padding: 4px; }")
         self.failed_toggle.toggled.connect(self._toggle_failed)
         root.addWidget(self.failed_toggle)
         self.failed_table = self._make_table(_FAILED_COLUMNS, stretch_cols=(1, 2))
@@ -118,16 +121,16 @@ class BulkCheckDialog(QDialog):
 
         footer = QHBoxLayout()
         footer.addStretch(1)
-        self.browse_button = QPushButton("Browse streams")
+        self.browse_button = set_variant(QPushButton("Browse streams"), "primary")
         self.browse_button.setToolTip(
             "Return to the main window with all working accounts\n(plus the ones whose server is unreachable, marked red)",
         )
         self.browse_button.setEnabled(False)
         self.browse_button.clicked.connect(self._browse)
-        self.close_button = QPushButton("Close")
+        self.close_button = set_variant(QPushButton("Close"), "ghost")
         self.close_button.clicked.connect(self.reject)
-        footer.addWidget(self.browse_button)
         footer.addWidget(self.close_button)
+        footer.addWidget(self.browse_button)
         root.addLayout(footer)
         self._update_unreachable_section()
 
@@ -137,6 +140,8 @@ class BulkCheckDialog(QDialog):
         table.setColumnCount(len(columns))
         table.setHorizontalHeaderLabels(columns)
         table.verticalHeader().setVisible(False)
+        table.verticalHeader().setDefaultSectionSize(32)
+        table.setShowGrid(False)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
@@ -265,11 +270,11 @@ class BulkCheckDialog(QDialog):
     @staticmethod
     def table_set(table: QTableWidget, row: int, col: int, cell: QTableWidgetItem, result: BulkResult) -> None:
         if result.ok:
-            cell.setBackground(QColor(46, 125, 50, 90))
+            cell.setBackground(theme.color("success", 0.12))
         elif is_server_unavailable(result):
-            cell.setBackground(QColor(200, 140, 30, 70))
+            cell.setBackground(theme.color("warning", 0.12))
         else:
-            cell.setBackground(QColor(120, 40, 40, 70))
+            cell.setBackground(theme.color("danger", 0.10))
         table.setItem(row, col, cell)
 
     def _toggle_failed(self, checked: bool) -> None:
@@ -277,8 +282,9 @@ class BulkCheckDialog(QDialog):
         self._update_failed_toggle()
 
     def _update_failed_toggle(self) -> None:
-        arrow = "▼" if self.failed_toggle.isChecked() else "▶"
-        self.failed_toggle.setText(f"{arrow} Non-working accounts ({self.failed_table.rowCount()})")
+        chevron = "chevron-down" if self.failed_toggle.isChecked() else "chevron-right"
+        self.failed_toggle.setIcon(theme.icon(chevron))
+        self.failed_toggle.setText(f"Non-working accounts ({self.failed_table.rowCount()})")
 
     def _update_unreachable_section(self) -> None:
         count = self.unreachable_table.rowCount()

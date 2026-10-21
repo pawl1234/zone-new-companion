@@ -13,17 +13,11 @@ from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PyQt6.QtGui import QColor
 
 from zone_new_companion.models import MediaItem
+from zone_new_companion.ui.theme import theme
 
 NUM_COL, NAME_COL, NOW_COL, STATUS_COL, VERIFY_COL, PLAY_COL = range(6)
 HEADERS = ["#", "Name", "Now Playing", "Status", "Verify", "Play"]
 
-_WHITE = QColor("#ffffff")
-_BLACK = QColor("#000000")
-# (status cell background, status text, tint for the rest of the row)
-_OK = (QColor("#2d5a2d"), _WHITE, QColor(46, 125, 50, 80))
-_OFF = (QColor("#8b0000"), _WHITE, QColor(198, 40, 40, 80))
-_UNSTABLE = (QColor("#ff8c00"), _BLACK, None)
-_UNKNOWN = (QColor("#4a4a4a"), _WHITE, None)
 
 
 def provider_num(metadata: dict, position: int) -> int:
@@ -36,14 +30,17 @@ def provider_num(metadata: dict, position: int) -> int:
     return position
 
 
-def _status_colors(status: str) -> tuple[QColor, QColor, QColor | None]:
+def _status_colors(status: str) -> tuple[QColor | None, QColor, QColor | None]:
+    """(status cell background, status text, tint for the rest of the row)."""
     if status.startswith(("OK", "✓")):
-        return _OK
-    if status.startswith(("OFF", "✗")):
-        return _OFF
-    if status.startswith(("UNSTABLE", "⚠")):
-        return _UNSTABLE
-    return _UNKNOWN
+        token = "success"
+    elif status.startswith(("OFF", "✗")):
+        token = "danger"
+    elif status.startswith(("UNSTABLE", "⚠")):
+        return theme.color("warning", 0.16), theme.color("warning"), None
+    else:
+        return None, theme.color("text_muted"), None
+    return theme.color(token, 0.18), theme.color(token), theme.color(token, 0.06)
 
 
 class MediaTableModel(QAbstractTableModel):
@@ -75,6 +72,11 @@ class MediaTableModel(QAbstractTableModel):
         self._verification = verification
         if self._items:
             self.dataChanged.emit(self.index(0, NUM_COL), self.index(len(self._items) - 1, STATUS_COL))
+
+    def refresh(self) -> None:
+        """Repaint every cell, e.g. after the theme changed its colors."""
+        if self._items:
+            self.dataChanged.emit(self.index(0, 0), self.index(len(self._items) - 1, len(HEADERS) - 1))
 
     def media_at(self, row: int) -> MediaItem | None:
         return self._items[row] if 0 <= row < len(self._items) else None
@@ -108,13 +110,13 @@ class MediaTableModel(QAbstractTableModel):
                 return self._now_playing.get(media.id, "")
             if col == STATUS_COL:
                 return self._status(media)
-            if col == VERIFY_COL:
-                return "🔍"
-            return "▶"
+            return "Verify" if col == VERIFY_COL else "Play"
         if role == Qt.ItemDataRole.UserRole:
             return media
-        if role == Qt.ItemDataRole.TextAlignmentRole and col in (VERIFY_COL, PLAY_COL):
-            return Qt.AlignmentFlag.AlignCenter
+        if role == Qt.ItemDataRole.DecorationRole and col in (VERIFY_COL, PLAY_COL):
+            return theme.icon("search" if col == VERIFY_COL else "play", "accent", filled=col == PLAY_COL)
+        if role == Qt.ItemDataRole.ForegroundRole and col in (VERIFY_COL, PLAY_COL):
+            return theme.color("accent")
         if role == Qt.ItemDataRole.ToolTipRole and col in (VERIFY_COL, PLAY_COL):
             return "Verify stream" if col == VERIFY_COL else "Play stream"
         if role == Qt.ItemDataRole.BackgroundRole and col <= STATUS_COL:
