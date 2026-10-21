@@ -1,6 +1,7 @@
 """Bulk Xtream URL availability checker dialog.
 
-Paste many Xtream ``get.php`` / ``player_api.php`` URLs (one per line), check
+Paste many Xtream ``get.php`` / ``player_api.php`` URLs (one per line, or
+``Host/User/Pass/M3U`` account blocks), check
 them all in parallel, then review the working accounts, the ones whose server
 is only unreachable right now (kept for a later Recheck) and, collapsed, the
 rejected ones, and jump back into the main window to browse + stream them.
@@ -37,7 +38,8 @@ _FAILED_COLUMNS = ["#", "URL", "Reason"]
 _PLACEHOLDER = (
     "Paste one Xtream URL per line, e.g.\n"
     "http://example.com:8080/get.php?username=USER&password=PASS&type=m3u_plus\n"
-    "http://other.tv:25461/player_api.php?username=USER2&password=PASS2"
+    "http://other.tv:25461/player_api.php?username=USER2&password=PASS2\n"
+    "or account blocks with Host: / User: / Pass: / M3U: lines, separated by -----"
 )
 
 
@@ -61,7 +63,7 @@ class BulkCheckDialog(QDialog):
 
         root = QVBoxLayout(self)
 
-        root.addWidget(QLabel("Paste Xtream URLs to check (one per line):"))
+        root.addWidget(QLabel("Paste Xtream URLs (one per line) or account blocks to check:"))
         self.input_box = QPlainTextEdit()
         self.input_box.setPlaceholderText(_PLACEHOLDER)
         self.input_box.setMaximumHeight(130)

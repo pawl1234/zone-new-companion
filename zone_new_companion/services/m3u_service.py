@@ -14,12 +14,18 @@ from zone_new_companion.services.network import DEFAULT_TIMEOUT, create_session
 from zone_new_companion.services.network_optimizer import OptimizedSession
 from zone_new_companion.services.logger_service import logger_service
 
+# Seconds to wait for an Xtream panel to start sending a get.php playlist.
+GET_PHP_READ_TIMEOUT = 60
+
 
 class M3UService(PortalService):
     """Service for M3U playlist parsing and streaming."""
 
     def __init__(self) -> None:
         self._session = OptimizedSession()
+        # get.php playlists are fetched without the optimizer: it caps the read
+        # timeout and repeats a timed-out request over several SSL profiles.
+        self._plain_session = create_session()
 
     def fetch_categories(self, credentials: Credentials) -> dict[str, list[PlaylistCategory]]:
         """Extract categories from M3U playlist."""
@@ -125,10 +131,9 @@ class M3UService(PortalService):
 
     def _fetch_from_get_php(self, url: str) -> str:
         """Handle XTREAM get.php URLs for M3U format."""
-        # This is a simplified implementation - in a real scenario, you might need
-        # to parse the get.php URL and make appropriate API calls
-        # For now, we'll try to fetch it as a direct M3U URL
-        response = self._session.get(url, timeout=DEFAULT_TIMEOUT)
+        # The panel builds the playlist on request, which can take a while on
+        # big servers before the first byte arrives.
+        response = self._plain_session.get(url, timeout=(DEFAULT_TIMEOUT, GET_PHP_READ_TIMEOUT))
         response.raise_for_status()
         return response.text
 

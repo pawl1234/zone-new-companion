@@ -1,7 +1,7 @@
 """Fast parallel account checker for Xtream, M3U and Stalker accounts.
 
 Mirrors the web app's bulk checker: paste many Xtream `get.php` / `player_api.php`
-URLs (one per line), check them all in parallel against `get_user_info`, and
+URLs (one per line, or "Host/User/Pass/M3U" account blocks), check them all in parallel against `get_user_info`, and
 report which accounts are reachable and valid. Saved accounts of every type
 (Xtream, M3U playlist, Stalker portal + MAC) are rechecked the same way via
 ``check_accounts``. Once a host fails at the connection level, the remaining
@@ -47,6 +47,9 @@ PROBE_BYTES = 188 * 12
 M3U_HEAD_BYTES = 256 * 1024
 # M3U answers that mean the playlist (or its credentials) is gone for good.
 M3U_REJECT_CODES = {401, 403, 404, 410}
+# Xtream panels build a get.php playlist on request; big ones take a while to
+# send the first byte.
+M3U_PLAYLIST_READ_TIMEOUT = 30.0
 
 # Upper bound on parallel requests. Enough to saturate the run without hammering
 # a single host so hard that it rate-limits us.
@@ -112,6 +115,70 @@ def _origin(url: str) -> str:
     host = parsed.hostname or ""
     port = f":{parsed.port}" if parsed.port else ""
     return f"{scheme}://{host}{port}"
+
+
+# Field names understood in pasted "Key: value" account blocks.
+_BLOCK_KEYS = {
+    "host": "host", "server": "host", "portal": "host",
+    "user": "user", "username": "user",
+    "pass": "pass", "password": "pass",
+    "m3u": "url", "url": "url", "link": "url",
+}
+_BLOCK_FIELD = re.compile(r"^\s*([A-Za-z][A-Za-z0-9 ]*?)\s*:\s*(.+?)\s*$")
+_SEPARATOR = re.compile(r"^\s*[-=_*#~]{3,}\s*$")
+
+
+def split_bulk_entries(lines: list[str]) -> list[str]:
+    """Turn pasted text into one checkable entry per account.
+
+    Plain URLs (one per line) pass through unchanged. Account blocks like::
+
+        Host: example.com:80
+        User: USER
+        Pass: PASS
+        Status: Active
+        M3U: http://example.com:80/get.php?username=USER&password=PASS
+
+    become their ``M3U``/``URL`` link, or a ``get.php`` link built from
+    Host/User/Pass when the block has none. Blocks end at a separator line
+    (``-----``), a blank line, or a repeated field; other fields are ignored.
+    """
+    entries: list[str] = []
+    block: dict[str, str] = {}
+
+    def flush() -> None:
+        if not block:
+            return
+        url, host = block.get("url", ""), block.get("host", "")
+        user, password = block.get("user", ""), block.get("pass", "")
+        if url and parse_qs(urlparse(url).query).get("username"):
+            entries.append(url)
+        elif host and user and password:
+            base = host if host.lower().startswith(("http://", "https://")) else f"http://{host}"
+            query = urlencode({"username": user, "password": password, "type": "m3u_plus"})
+            entries.append(f"{_origin(base)}/get.php?{query}")
+        else:
+            # Unusable block: keep it as one entry so the user sees it failed.
+            entries.append(url or " ".join(f"{key}: {value}" for key, value in block.items()))
+        block.clear()
+
+    for raw in lines:
+        if not raw.strip() or _SEPARATOR.match(raw):
+            flush()
+            continue
+        match = None if raw.strip().lower().startswith(("http://", "https://")) else _BLOCK_FIELD.match(raw)
+        key = _BLOCK_KEYS.get(match.group(1).lower()) if match else None
+        if key:
+            if key in block:
+                flush()
+            block[key] = match.group(2)
+        elif match:
+            continue  # Another field of the block (Status, Expires, ...).
+        else:
+            flush()
+            entries.append(raw.strip())
+    flush()
+    return entries
 
 
 def parse_bulk_line(line_number: int, raw: str) -> BulkInput:
@@ -254,6 +321,19 @@ def carry_stream_history(result: BulkResult, previous: BulkResult | None) -> Non
         result.stream_down_since = ""
 
 
+def _get_php_account(item: BulkInput) -> BulkInput | None:
+    """The Xtream account behind an M3U ``get.php`` link, if it is one."""
+    if item.portal_type != PortalType.M3U.value:
+        return None
+    parsed = urlparse(item.base_url)
+    params = parse_qs(parsed.query)
+    username = (params.get("username") or [""])[0]
+    password = (params.get("password") or [""])[0]
+    if not (parsed.path.endswith("get.php") and username and password):
+        return None
+    return BulkInput(item.line_number, item.raw, _origin(item.base_url), username, password)
+
+
 def _result_for(item: BulkInput, **fields: object) -> BulkResult:
     """An unchecked result carrying the entry's account details."""
     return BulkResult(
@@ -351,9 +431,7 @@ class BulkChecker:
         results: dict[int, BulkResult] = {}
 
         line_number = 0
-        for raw in lines:
-            if not raw.strip():
-                continue
+        for raw in split_bulk_entries(lines):
             line_number += 1
             try:
                 parsed.append(parse_bulk_line(line_number, raw))
@@ -442,7 +520,8 @@ class BulkChecker:
                     dead_hosts.setdefault(host, result.error)
             elif result.ok and probe and not self._cancel.is_set():
                 if stream_urls is None:
-                    self._probe_streams(item, result, session, dead_stream_hosts, lock)
+                    account = _get_php_account(item) or item
+                    self._probe_streams(account, result, session, dead_stream_hosts, lock)
                 else:
                     self._probe_urls(result, stream_urls, session, dead_stream_hosts, lock)
             if is_server_unavailable(result):
@@ -579,33 +658,60 @@ class BulkChecker:
             rejected=bool(rejection),
         )
 
-    def _check_m3u(self, item: BulkInput, session: requests.Session) -> tuple[BulkResult, list[str]]:
-        """Fetch the head of an M3U playlist; return it with a few channel URLs."""
+    def _check_m3u(self, item: BulkInput, session: requests.Session) -> tuple[BulkResult, list[str] | None]:
+        """Fetch the head of an M3U playlist; return it with a few channel URLs.
+
+        A ``get.php`` playlist is an Xtream account underneath. Its fast login
+        API is asked first: an unreachable server or refused account is settled
+        without waiting for the server to build the whole playlist, which can
+        take longer than a normal read timeout. When the account logs in but
+        the playlist still can't be read, ``None`` is returned in place of the
+        channel URLs so the streams are probed through the Xtream API instead.
+        """
         result = _result_for(item)
+        xtream = _get_php_account(item)
+        info = self._check_one(xtream, session) if xtream is not None else None
+        if info is not None and (info.conn_level or info.rejected):
+            result.error, result.conn_level, result.rejected = info.error, info.conn_level, info.rejected
+            return result, []
+        logged_in = info is not None and info.ok
+        if logged_in:
+            result.status = info.status
+            result.expiry = info.expiry
+            result.max_connections = info.max_connections
+            result.active_connections = info.active_connections
+            result.timezone = info.timezone
+            result.output_formats = info.output_formats
+        read_timeout = M3U_PLAYLIST_READ_TIMEOUT if xtream is not None else FAST_READ_TIMEOUT
+
+        def playlist_failed(error: str, **fields: bool) -> tuple[BulkResult, list[str] | None]:
+            if logged_in:
+                # The account works; only the playlist download didn't.
+                result.ok = True
+                result.real_url = info.real_url
+                return result, None
+            result.error = error
+            for name, value in fields.items():
+                setattr(result, name, value)
+            return result, []
+
         try:
-            response = session.get(
-                item.base_url, stream=True, timeout=(FAST_CONNECT_TIMEOUT, FAST_READ_TIMEOUT),
-            )
+            response = session.get(item.base_url, stream=True, timeout=(FAST_CONNECT_TIMEOUT, read_timeout))
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.SSLError) as exc:
-            result.error, result.conn_level = self._short_error(exc), True
-            return result, []
+            return playlist_failed(self._short_error(exc), conn_level=True)
         except requests.RequestException as exc:
-            result.error = self._short_error(exc)
-            return result, []
+            return playlist_failed(self._short_error(exc))
         if response.status_code >= 400:
             response.close()
-            result.error = f"{response.status_code} Client Error" if response.status_code < 500 else (
+            error = f"{response.status_code} Client Error" if response.status_code < 500 else (
                 f"{response.status_code} Server Error"
             )
-            result.rejected = response.status_code in M3U_REJECT_CODES
-            return result, []
+            return playlist_failed(error, rejected=response.status_code in M3U_REJECT_CODES)
         final_url = response.url
         text = self._read_head(response, limit=M3U_HEAD_BYTES).decode("utf-8", "replace")
         if "#EXTINF" not in text and "#EXTM3U" not in text:
             # The server answered, but with no playlist: expired or wrong link.
-            result.error = "Empty playlist" if not text.strip() else "Not an M3U playlist"
-            result.rejected = True
-            return result, []
+            return playlist_failed("Empty playlist" if not text.strip() else "Not an M3U playlist", rejected=True)
 
         lines = [line.strip() for line in text.splitlines()]
         stream_urls = [
@@ -614,23 +720,10 @@ class BulkChecker:
             if line.startswith("#EXTINF") and lines[index + 1].startswith(("http://", "https://"))
         ]
         result.ok = True
-        result.status = "Playlist OK"
-        result.expiry = "N/A"
+        if not logged_in:
+            result.status = "Playlist OK"
+            result.expiry = "N/A"
         result.real_url = _origin(final_url)
-        # A get.php playlist is an Xtream account underneath: ask for its details.
-        parsed = urlparse(item.base_url)
-        params = parse_qs(parsed.query)
-        username = (params.get("username") or [""])[0]
-        password = (params.get("password") or [""])[0]
-        if parsed.path.endswith("get.php") and username and password:
-            xtream = BulkInput(item.line_number, item.raw, _origin(item.base_url), username, password)
-            info = self._check_one(xtream, session)
-            if info.ok:
-                result.status = info.status
-                result.expiry = info.expiry
-                result.max_connections = info.max_connections
-                result.active_connections = info.active_connections
-                result.timezone = info.timezone
         # Live channels come first in most playlists; skip VOD files.
         live = [url for url in stream_urls if not re.search(r"/(movie|series)/", url)]
         return result, (live or stream_urls)[:PROBE_CHANNELS]
