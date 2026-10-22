@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 if sys.platform == 'win32':
     try:
         import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('kidpoleon.zone-new-companion.2.0.0')
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('kidpoleon.zone-new-companion.2.0.1')
     except Exception:
         pass
 

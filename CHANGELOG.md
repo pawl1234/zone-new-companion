@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-10-22
+
+### Fixed
+- **Windows: the 2.0.0 executable did not start**: it closed right away without a message. The release build used the runner's preinstalled Python 3.15 instead of 3.12, and the exe lacked `python3t.dll`, which cryptography's extension needs (*DLL load failed while importing _rust*)
+  - The build script uses the Python set up by the workflow (`pythonLocation`) before the `py` launcher
+  - The build starts the finished exe with `--self-test` (imports the whole app, loads libmpv) and fails when that doesn't work, so a broken exe is no longer released
+- **Startup errors are shown**: when the app cannot start, a Windows error dialog shows the reason, which is also saved to `~/.zone-new-companion/logs/startup-error.log`; before, the windowed exe had no console and the error was lost
+
 ## [2.0.0] - 2026-10-22
 
 ### Added

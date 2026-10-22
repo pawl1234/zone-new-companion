@@ -42,8 +42,12 @@ function Invoke-Checked {
 }
 
 function Find-Python {
-    # The app needs Python 3.10+ (dataclass slots); prefer the py launcher's newest.
-    foreach ($candidate in @(@('py', '-3'), @('python'))) {
+    # The app needs Python 3.10+ (dataclass slots). In CI, use the Python that
+    # actions/setup-python installed: the py launcher would pick the runner's newest
+    # preinstalled one instead (3.15 built v2.0.0, whose exe could not load cryptography).
+    $candidates = @(@('py', '-3'), @('python'))
+    if ($env:pythonLocation) { $candidates = @(, @(Join-Path $env:pythonLocation 'python.exe')) + $candidates }
+    foreach ($candidate in $candidates) {
         $exe = Get-Command $candidate[0] -ErrorAction SilentlyContinue
         if (-not $exe) { continue }
         $pyArgs = @($candidate | Select-Object -Skip 1)
@@ -146,6 +150,19 @@ try {
 
     $exe = Join-Path $Root "dist\$Name.exe"
     if (-not (Test-Path $exe)) { throw "PyInstaller finished but $exe is missing." }
+
+    # PyInstaller does not notice a DLL a bundled extension cannot load; only starting
+    # the exe does. The windowed exe has no console, so it writes its result to a file.
+    Write-Host 'Self-test of the executable...'
+    $report = Join-Path $Root 'build\self-test.txt'
+    Remove-Item $report -ErrorAction SilentlyContinue
+    $test = Start-Process $exe -ArgumentList @('--self-test', "`"$report`"") -Wait -PassThru
+    $result = if (Test-Path $report) { (Get-Content $report -Raw).Trim() } else { 'no report written' }
+    $libmpvMissingAllowed = $NoLibmpv -and $test.ExitCode -eq 2
+    if ($test.ExitCode -ne 0 -and -not $libmpvMissingAllowed) {
+        throw "Self-test of $exe failed with exit code $($test.ExitCode):`n$result"
+    }
+
     $size = [math]::Round((Get-Item $exe).Length / 1MB)
     Write-Host ''
     Write-Host "Built $exe ($size MB)" -ForegroundColor Green
