@@ -46,12 +46,13 @@ function Find-Python {
         if (-not $exe) { continue }
         $pyArgs = @($candidate | Select-Object -Skip 1)
         try {
-            # The Microsoft Store "python" stub fails here, as it should.
-            $version = & $exe.Source @pyArgs -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>$null
+            # The Microsoft Store "python" stub fails here, as it should. No double
+            # quotes in the code: Windows PowerShell 5.1 strips them from native arguments.
+            & $exe.Source @pyArgs -c 'import sys; sys.exit(sys.version_info < (3, 10))' 2>$null
         } catch {
             continue
         }
-        if ($LASTEXITCODE -eq 0 -and $version -and [version]$version -ge [version]'3.10') {
+        if ($LASTEXITCODE -eq 0) {
             return , (@($exe.Source) + $pyArgs)
         }
     }
