@@ -91,7 +91,10 @@ function Get-Libmpv {
     }
     New-Item -ItemType Directory -Force -Path $MpvCache | Out-Null
     Write-Host "Looking up the latest libmpv release of $MpvRepo..."
-    $release = Invoke-RestMethod "https://api.github.com/repos/$MpvRepo/releases/latest" -Headers @{ 'User-Agent' = $Name }
+    $headers = @{ 'User-Agent' = $Name }
+    # CI runners share IPs, so the anonymous API limit runs out; use the job's token there.
+    if ($env:GITHUB_TOKEN) { $headers['Authorization'] = "Bearer $env:GITHUB_TOKEN" }
+    $release = Invoke-RestMethod "https://api.github.com/repos/$MpvRepo/releases/latest" -Headers $headers
     # Plain x86_64, not the -v3 build, which needs a CPU with AVX2.
     $asset = $release.assets | Where-Object { $_.name -match '^mpv-dev-x86_64-\d{8}-git-[0-9a-f]+\.7z$' } | Select-Object -First 1
     if (-not $asset) { throw "No mpv-dev-x86_64 archive in release $($release.tag_name) of $MpvRepo." }

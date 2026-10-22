@@ -4,7 +4,7 @@
 
 # Zone New Companion
 
-[![Version](https://img.shields.io/badge/version-1.2.3-blue.svg)](https://github.com/kidpoleon/zone-new-companion/releases)
+[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](https://github.com/kidpoleon/zone-new-companion/releases)
 [![Python](https://img.shields.io/badge/python-3.8+-3776ab.svg)](https://www.python.org/)
 [![PyQt6](https://img.shields.io/badge/PyQt6-6.7+-41cd52.svg)](https://www.riverbankcomputing.com/software/pyqt/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -199,43 +199,36 @@ sudo port install python312 vlc git
 
 Download the latest release for your platform from [GitHub Releases](https://github.com/kidpoleon/zone-new-companion/releases):
 
-- **Windows**: `zone-new-companion.exe`
-- **Linux**: `zone-new-companion-1.2.3-x86_64.AppImage`
-- **macOS**: `Zone New Companion.dmg` or `.app`
+- **Windows**: `zone-new-companion-<version>.exe`, one file with the built-in player inside
+- **macOS** (Apple Silicon): `Zone-New-Companion-<version>.dmg`
+- **Linux**: no pre-built package; see [Build from Source](#build-from-source) or [BUILD.md](BUILD.md)
+
+Each release also lists `SHA256SUMS.txt` with the checksums of its files.
 
 #### Quick Download Commands
 
 **Windows (PowerShell):**
 ```powershell
 # Download Windows executable
-Invoke-WebRequest -Uri "https://github.com/kidpoleon/zone-new-companion/releases/download/v1.2.3/zone-new-companion.exe" -OutFile "zone-new-companion.exe"
+Invoke-WebRequest -Uri "https://github.com/kidpoleon/zone-new-companion/releases/download/v2.0.0/zone-new-companion-2.0.0.exe" -OutFile "zone-new-companion.exe"
 # Run
 .\zone-new-companion.exe
-```
-
-**Linux:**
-```bash
-# Download Linux AppImage
-wget https://github.com/kidpoleon/zone-new-companion/releases/download/v1.2.3/zone-new-companion-1.2.3-x86_64.AppImage
-# Make executable
-chmod +x zone-new-companion-1.2.3-x86_64.AppImage
-# Run
-./zone-new-companion-1.2.3-x86_64.AppImage
 ```
 
 **macOS:**
 ```bash
 # Download macOS DMG
-curl -L -o "Zone-New-Companion-1.2.3.dmg" "https://github.com/kidpoleon/zone-new-companion/releases/download/v1.2.3/Zone-New-Companion-1.2.3.dmg"
+curl -L -o "Zone-New-Companion-2.0.0.dmg" "https://github.com/kidpoleon/zone-new-companion/releases/download/v2.0.0/Zone-New-Companion-2.0.0.dmg"
 # Open
-open "Zone-New-Companion-1.2.3.dmg"
+open "Zone-New-Companion-2.0.0.dmg"
 ```
+
+The app is not notarized: the first time, right-click it in Applications → *Open*.
 
 **Verify Download Integrity:**
 ```bash
-# SHA256 checksums (verify after download)
-sha256sum zone-new-companion.exe
-sha256sum zone-new-companion-1.2.3-x86_64.AppImage
+# Compare with SHA256SUMS.txt from the release
+shasum -a 256 Zone-New-Companion-2.0.0.dmg
 ```
 
 ### Build from Source

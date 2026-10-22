@@ -1,0 +1,118 @@
+# Publishes a GitHub release with the Windows .exe and the macOS .dmg.
+#
+# Runs on every push to main: when __version__ in zone_new_companion/__init__.py
+# has no tag v<version> yet, it builds both platforms, creates the tag on that
+# commit and uses the version's CHANGELOG.md section as the release notes.
+# Pushes that don't change the version stop after the first job.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' zone_new_companion/__init__.py)"
+          if [[ -z "$version" ]]; then
+            echo "::error::No __version__ in zone_new_companion/__init__.py"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "v$version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release v$version exists already; nothing to do."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! grep -q "^## \[$version\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$version]' section"
+            exit 1
+          fi
+          echo "release=true" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: version
+    if: needs.version.outputs.release == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
+      - name: Name with version
+        run: Rename-Item dist\zone-new-companion.exe "zone-new-companion-${{ needs.version.outputs.version }}.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/zone-new-companion-${{ needs.version.outputs.version }}.exe
+          if-no-files-found: error
+
+  macos:
+    needs: version
+    if: needs.version.outputs.release == 'true'
+    # Apple Silicon; Homebrew's libmpv runs on this runner's macOS version or newer.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install libmpv
+        run: brew install mpv
+      - name: Build
+        run: scripts/build_macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/Zone-New-Companion-${{ needs.version.outputs.version }}.dmg
+          if-no-files-found: error
+
+  release:
+    needs: [version, windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          # The version's section: from its heading up to the next version heading.
+          awk -v v="$VERSION" '
+            index($0, "## [" v "]") == 1 { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          (cd assets && sha256sum -- * > SHA256SUMS.txt)
+          gh release create "v$VERSION" assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "v$VERSION" \
+            --notes-file notes.md

@@ -367,28 +367,33 @@ xcrun altool --notarize-app --primary-bundle-id "com.kidpoleon.zone-new-companio
 
 ## Automated Builds (GitHub Actions)
 
-This repository includes a GitHub Actions workflow that automatically builds and releases packages for all platforms.
+`.github/workflows/release.yml` builds and publishes a release whenever `main`
+gets a version that has no release yet.
 
-### How It Works
+### Releasing a Version
 
-1. Push a tag starting with 'v' (e.g., `v1.2.1`)
-2. GitHub Actions automatically:
-   - Creates a new release
-   - Builds for Windows, Linux, and macOS
-   - Attaches all binaries to the release
+1. Set `__version__` in `zone_new_companion/__init__.py` (and the other places
+   in the [Build Checklist](#build-checklist)).
+2. In `CHANGELOG.md`, rename `## [Unreleased]` to `## [<version>] - <date>` and
+   add an empty `## [Unreleased]` above it. The release fails without that section.
+3. Merge into `main`. GitHub Actions then:
+   - builds `zone-new-companion-<version>.exe` on Windows with `scripts/build_windows.ps1`
+   - builds `Zone-New-Companion-<version>.dmg` on macOS (Apple Silicon) with `scripts/build_macos.sh`
+   - creates the tag `v<version>` on the merge commit and a release with both files,
+     `SHA256SUMS.txt` and the version's changelog section as notes
 
-### Manual Trigger
-
-You can also trigger the workflow manually from the Actions tab.
+Pushes to `main` that keep the version skip the build. If a build fails, fix it
+and push again, or rerun the workflow from the Actions tab (*Run workflow*).
+To rebuild a version that is already released, delete its release and tag first.
 
 ### Required Secrets
 
-No additional secrets are required for basic builds. The workflow uses `GITHUB_TOKEN` which is automatically provided.
+None; the workflow uses the job's `GITHUB_TOKEN`. In the repository settings,
+Actions must be allowed to run (forks have them off until you enable them).
 
-For macOS code signing (optional):
-- `APPLE_DEVELOPER_ID`: Your Apple Developer ID
-- `APPLE_ID`: Your Apple ID email
-- `APPLE_APP_PASSWORD`: App-specific password
+The builds are not code signed: Windows SmartScreen warns on first start, and
+on macOS the app opens with right-click → *Open*. The macOS build runs on the
+runner's macOS version or newer, Apple Silicon only.
 
 ---
 
@@ -468,7 +473,8 @@ Place icon at `media/logo.png` (256x256 or larger).
 
 Before releasing, verify:
 
-- [ ] Version number updated in all files
+- [ ] Version number updated: `zone_new_companion/__init__.py`, the AppUserModelID in `zone_new_companion/app.py`, `README.md`, `SECURITY.md`, `chocolatey/zone-new-companion.nuspec`
+- [ ] `CHANGELOG.md` has a section for the version
 - [ ] Icon properly embedded
 - [ ] Application launches without errors
 - [ ] Built-in player plays live TV, movies and series (libmpv bundled)

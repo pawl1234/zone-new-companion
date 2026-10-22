@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-10-22
+
 ### Added
 - **Import from base64 string**: *Add → Import from base64 string…* decodes a shared string, shows what's in it and offers to fetch the accounts from the link inside (or to check the accounts it contains directly); the found accounts open in the bulk check right away
   - paste.sh pastes are decrypted with the key from the link (`#…`), pastebin.com links read the raw paste, other links are downloaded as text
@@ -39,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Stream Verification without external tools**: Verify now plays a few seconds of each stream headless through the bundled libmpv and reports *OK (Video+Audio)*, *OK (Video)*, *OK (Audio)* or why it is *OFF* (Unreachable, Timeout, Stalled, No Video/Audio)
   - Without libmpv it reads the stream's container instead (MPEG-TS, MP4, HLS, ADTS) and checks that video and audio packets arrive
   - At most 4 streams are probed at once; streams refused at connect are retried one by one, so accounts limited to one connection verify correctly
+- **Automatic releases**: Merging a version bump into `main` builds the Windows `.exe` and the macOS `.dmg` on GitHub Actions and publishes them as a GitHub release, with this changelog's section as the release notes
+  - `scripts/build_windows.ps1` and `scripts/build_macos.sh` build each platform locally, with libmpv bundled
 
 ### Fixed
 - **Closing the app during background work**: Closing while catalogs were indexing (or a check was running) crashed Python on exit; indexing now stops and the app closes cleanly
