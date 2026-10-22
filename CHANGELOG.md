@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Search across accounts**: New *Search* tab (Ctrl+F) finds movies, series and live channels in every working XTREAM account at once, filtered by account (all, starred, the one being browsed) and type
+- **Search across accounts**: New *Search* tab (Ctrl+F) finds movies, series and live channels in every working XTREAM and M3U account at once, filtered by account (all, starred, the one being browsed) and type
   - Catalogs download in the background into `~/.zone-new-companion/catalog.db` and refresh daily; accounts on the same server with the same packages share one download
   - Accounts that are down (red) drop out of the results right away; removing an account deletes its data
   - Double-click plays a channel or movie on the account that has it, or opens a series' seasons
@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Only the first 5 working accounts are indexed by default (starred first, then the ones that stream); View → Search index changes the limit, and a new *Search* column in Working Accounts shows each account's state (Indexed, Indexing…, Queued, Not indexed, Paused)
   - Results that update in the background keep expanded rows, the selection and the scroll position
   - Catalogs also refresh while the app stays open (checked hourly, failed ones are retried); View → Search index sets how often (12 hours, 24 hours, 3 days), shows the index size, and offers *Refresh all now* and *Clear index…*
+  - M3U accounts are searchable too: the playlist is downloaded once and read in one pass; `get.php` links are indexed through their Xtream API (movies and series apart, shared with the same account added as XTREAM) and fall back to the playlist when the panel refuses it
   - Right-click an account in Working Accounts → *Refresh search index* downloads its catalog again right away; a failed refresh keeps the older catalog and shows the error in the Search column's tooltip
 
 ### Changed

@@ -315,7 +315,7 @@ class SearchPanel(QWidget):
         row[0].setData(group, _PAYLOAD)
         best = group.best
         row[0].setToolTip(
-            ("Double-click to open the seasons" if group.kind == "series" else "Double-click to play")
+            ("Double-click to play" if best.playable else "Double-click to open the seasons")
             + f" on {best.account_label}" + ("" if count == 1 else " (the best account; expand to pick another)"),
         )
         # One copy on one account needs no list to pick from.
@@ -413,10 +413,10 @@ class SearchPanel(QWidget):
         hit = self._hit_at(index)
         if hit is None:
             return
-        if hit.kind == "series":
-            self.hit_open_requested.emit(hit)
-        else:
+        if hit.playable:
             self.hit_play_requested.emit(hit, False)
+        else:
+            self.hit_open_requested.emit(hit)
 
     def _show_menu(self, pos) -> None:
         index = self.tree.indexAt(pos)
@@ -424,7 +424,7 @@ class SearchPanel(QWidget):
         if hit is None:
             return
         menu = QMenu(self.tree)
-        if hit.kind == "series":
+        if not hit.playable:
             menu.addAction(f"Open seasons on {hit.account_label}", lambda: self.hit_open_requested.emit(hit))
         else:
             menu.addAction(f"Play on {hit.account_label}", lambda: self.hit_play_requested.emit(hit, False))

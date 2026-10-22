@@ -22,7 +22,8 @@ from zone_new_companion.services.title_parser import QUALITY_RANK
 LOGGER = logging.getLogger(__name__)
 
 # 2: parsed titles, languages and account health for grouping and filters.
-SCHEMA_VERSION = 2
+# 3: stream URLs of M3U playlist entries.
+SCHEMA_VERSION = 3
 # Matching rows (stream x account) read per search, best first; they are
 # grouped into at most GROUP_LIMIT titles.
 ROW_LIMIT = 5000
@@ -74,7 +75,9 @@ CREATE TABLE item (
     cat_langs TEXT NOT NULL,
     extension TEXT NOT NULL,
     icon TEXT NOT NULL,
-    added_at INTEGER NOT NULL
+    added_at INTEGER NOT NULL,
+    -- M3U entries play from their own URL; '' builds it from provider_id.
+    url TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX item_source ON item(source_id);
 """
@@ -125,6 +128,7 @@ class CatalogItem:
     extension: str = ""
     icon: str = ""
     added_at: int = 0
+    url: str = ""
 
 
 @dataclass(slots=True)
@@ -171,6 +175,12 @@ class SearchHit:
     starred: bool
     stream_ok: bool | None
     free_slots: bool | None  # None: the server does not say
+    url: str = ""  # M3U entries: the stream itself
+
+    @property
+    def playable(self) -> bool:
+        """Played directly; else (an Xtream series) its seasons are opened."""
+        return self.kind != "series" or bool(self.url)
 
     @property
     def play_rank(self) -> tuple:
@@ -410,13 +420,13 @@ class CatalogStore:
                 )
                 cursor = connection.executemany(
                     "INSERT INTO item(source_id, kind, provider_id, category_id, name, title, title_norm, year, "
-                    "quality, quality_rank, item_langs, cat_langs, extension, icon, added_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "quality, quality_rank, item_langs, cat_langs, extension, icon, added_at, url) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         (
                             source_id, i.kind, i.provider_id, i.category_id, i.name, i.title or i.name,
                             i.title_norm, i.year, i.quality, QUALITY_RANK.get(i.quality, 0),
-                            _codes(i.item_langs), _codes(i.cat_langs), i.extension, i.icon, i.added_at,
+                            _codes(i.item_langs), _codes(i.cat_langs), i.extension, i.icon, i.added_at, i.url,
                         )
                         for i in items
                     ),
@@ -467,7 +477,7 @@ class CatalogStore:
             f"SELECT a.key, a.label, i.kind, i.provider_id, i.name, i.title, i.title_norm, i.year, i.quality, "
             f"CASE WHEN i.item_langs != '' THEN i.item_langs ELSE i.cat_langs END, COALESCE(c.name, ''), "
             f"i.extension, i.icon, i.added_at, a.starred, a.stream_ok, "
-            f"CASE WHEN a.max_conn > 0 THEN a.active_conn < a.max_conn END "
+            f"CASE WHEN a.max_conn > 0 THEN a.active_conn < a.max_conn END, i.url "
             f"FROM {source} "
             f"JOIN account a ON a.source_id = i.source_id "
             f"LEFT JOIN category c ON c.source_id = i.source_id AND c.kind = i.kind "
@@ -478,7 +488,7 @@ class CatalogStore:
         hits = [
             SearchHit(
                 *row[:9], row[9].strip(), *row[10:14], bool(row[14]),
-                None if row[15] is None else bool(row[15]), None if row[16] is None else bool(row[16]),
+                None if row[15] is None else bool(row[15]), None if row[16] is None else bool(row[16]), row[17],
             )
             for row in rows
         ]

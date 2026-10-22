@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import requests
@@ -60,6 +61,13 @@ class M3UService(PortalService):
     def fetch_connection_info(self, credentials: Credentials) -> dict[str, str]:
         """M3U playlists don't have account info."""
         return {"Type": "M3U Playlist", "URL": credentials.base_url}
+
+    def fetch_playlist(self, url: str) -> str:
+        """The playlist's text, downloaded once (for the search index)."""
+        try:
+            return self._fetch_playlist_content(url)
+        except (RequestException, ValueError) as e:
+            raise RuntimeError(f"Failed to fetch playlist: {e}")
 
     def _fetch_playlist_content(self, url: str) -> str:
         """Fetch M3U playlist content with enhanced error handling."""
@@ -199,3 +207,46 @@ class M3UService(PortalService):
             i += 1
         
         return items
+
+
+@dataclass(slots=True)
+class PlaylistEntry:
+    """One #EXTINF entry of an M3U playlist."""
+
+    name: str
+    url: str
+    group: str = ""
+    logo: str = ""
+    tvg_id: str = ""
+
+
+_ATTRIBUTE = re.compile(r'([\w-]+)="([^"]*)"')
+
+
+def parse_playlist(content: str) -> list[PlaylistEntry]:
+    """Every entry of a playlist in one pass, in playlist order.
+
+    The name follows the first comma after the attributes; attribute values
+    may hold commas themselves.
+    """
+    entries: list[PlaylistEntry] = []
+    pending: PlaylistEntry | None = None
+    for line in content.splitlines():
+        line = line.strip()
+        if line.startswith("#EXTINF:"):
+            info = line[len("#EXTINF:"):]
+            attributes = dict(_ATTRIBUTE.findall(info))
+            _head, _comma, name = _ATTRIBUTE.sub("", info).partition(",")
+            pending = PlaylistEntry(
+                name=name.strip() or attributes.get("tvg-name", ""),
+                url="",
+                group=attributes.get("group-title", ""),
+                logo=attributes.get("tvg-logo", ""),
+                tvg_id=attributes.get("tvg-id", ""),
+            )
+        elif line and not line.startswith("#") and pending is not None:
+            pending.url = line
+            if pending.name:
+                entries.append(pending)
+            pending = None
+    return entries

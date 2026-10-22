@@ -31,7 +31,13 @@ from zone_new_companion.services.bulk_checker import (
     now_stamp,
     result_from_credentials,
 )
-from zone_new_companion.services.catalog_indexer import INDEXED_PORTALS, index_account, server_of
+from zone_new_companion.services.catalog_indexer import (
+    INDEXED_PORTALS,
+    index_account,
+    index_m3u_account,
+    server_of,
+    xtream_credentials,
+)
 from zone_new_companion.services.catalog_store import CatalogAccount, CatalogStore, SearchFilters, SearchHit, SearchResult
 from zone_new_companion.services.country_filter import codes_for_language, filter_items
 from zone_new_companion.services.filter_debug import FilterDebugDumper, debug_enabled
@@ -89,6 +95,7 @@ class AppController:
         # app), with a separate service so its session stays off the UI's.
         self._catalog = catalog
         self._index_service = XtreamService()
+        self._index_m3u = M3UService()
         # (account key, credentials, fresh_after): a catalog stored after
         # fresh_after (epoch) is reused, an older one downloaded again.
         self._index_queue: queue.Queue[tuple[str, Credentials, float] | None] = queue.Queue()
@@ -1113,7 +1120,7 @@ class AppController:
 
     def _index_loop(self) -> None:
         """Indexer thread: one queued account after the other until shutdown."""
-        catalog, service, stop = self._catalog, self._index_service, self._index_stop
+        catalog, service, m3u, stop = self._catalog, self._index_service, self._index_m3u, self._index_stop
         while not stop.is_set():
             job = self._index_queue.get()
             if job is None or stop.is_set():
@@ -1121,10 +1128,15 @@ class AppController:
             key, credentials, fresh_after = job
             safe_emit(self._index_signals.started, key)
             try:
-                summary = index_account(
-                    catalog, service, credentials, key,
-                    max_age_seconds=time.time() - fresh_after, cancelled=stop.is_set,
-                )
+                max_age = time.time() - fresh_after
+                if credentials.portal_type == PortalType.M3U:
+                    summary = index_m3u_account(
+                        catalog, m3u, service, credentials, key, max_age_seconds=max_age, cancelled=stop.is_set,
+                    )
+                else:
+                    summary = index_account(
+                        catalog, service, credentials, key, max_age_seconds=max_age, cancelled=stop.is_set,
+                    )
             except Exception as exc:  # noqa: BLE001 - reported per account, the loop goes on
                 if stop.is_set():
                     return
@@ -1275,6 +1287,14 @@ class AppController:
             None,
         )
 
+    @staticmethod
+    def _hit_credentials(account: BulkResult, hit: SearchHit) -> Credentials:
+        """Login for a hit: an M3U get.php account indexed through its Xtream API uses that API."""
+        credentials = credentials_for(account)
+        if hit.url:
+            return credentials
+        return xtream_credentials(credentials) or credentials
+
     def play_search_hit(
         self,
         hit: SearchHit,
@@ -1287,14 +1307,14 @@ class AppController:
         if account is None:
             on_error("That account is no longer in the list.")
             return
-        credentials = credentials_for(account)
+        credentials = self._hit_credentials(account, hit)
         item_type = "channel" if hit.kind == "live" else "vod"
         item = MediaItem(
             id=hit.provider_id,
             name=hit.name,
             media_kind=hit.kind,
             item_type=item_type,
-            stream_url=stream_url_for(credentials, item_type, hit.provider_id, hit.extension),
+            stream_url=hit.url or stream_url_for(credentials, item_type, hit.provider_id, hit.extension),
         )
         self.play(item, on_success=on_success, on_error=on_error, use_vlc=use_vlc, profile=credentials)
 
@@ -1313,16 +1333,21 @@ class AppController:
         if account is None:
             on_error("That account is no longer in the list.")
             return
-        tab_name = {"live": "Live", "movies": "Movies"}.get(hit.kind, "Series")
+        credentials = self._hit_credentials(account, hit)
+        # An M3U playlist lists everything under Live.
+        tab_name = (
+            "Live" if credentials.portal_type == PortalType.M3U
+            else {"live": "Live", "movies": "Movies"}.get(hit.kind, "Series")
+        )
 
         def on_connected(message: str) -> None:
             on_success(message)
             on_opened(tab_name)
-            if hit.kind == "series":
+            if not hit.playable:
                 series = MediaItem(id=hit.provider_id, name=hit.name, media_kind="series", item_type="series")
                 self.activate_item(tab_name, series, on_success=on_success, on_error=on_error)
 
-        self.connect_from_bulk(account, on_success=on_connected, on_error=on_error)
+        self.connect(credentials, on_success=on_connected, on_error=on_error)
 
     def _remember_success(self, credentials: Credentials) -> None:
         LOGGER.info("Saving successful connection for %s", credentials.base_url)
