@@ -35,7 +35,9 @@ $MpvCache = Join-Path $Root 'build\libmpv'
 
 function Invoke-Checked {
     param([string]$Exe, [string[]]$Arguments)
-    & $Exe @Arguments
+    # To the console, not the pipeline: otherwise the tool's output becomes part of
+    # the calling function's return value (Get-Libmpv returned 7-Zip's log).
+    & $Exe @Arguments | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "$Exe failed with exit code $LASTEXITCODE" }
 }
 
