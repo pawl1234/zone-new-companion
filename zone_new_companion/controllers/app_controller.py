@@ -110,7 +110,14 @@ class AppController:
         self._index_signals.started.connect(self._on_index_started)
         self._index_signals.done.connect(self._on_index_done)
         self._indexing: set[str] = set()  # queued or running
+        # Keys whose catalog is still wanted; a queued or running download of
+        # any other (removed, beyond the limit) is dropped. Replaced, never mutated.
+        self._index_wanted: frozenset[str] = frozenset()
         self._index_running: str | None = None
+        # Categories a check saw for accounts not in the catalog yet (just
+        # added): stored once the account is, and opening it uses them at once.
+        self._sighted: dict[str, tuple[str, str, str, list[tuple[str, str, str]]]] = {}
+        self._sighted_lock = threading.Lock()
         self._index_errors: dict[str, str] = {}
         self._catalog_listener: Callable[[str, dict], None] | None = None
         # Catalogs go stale while the app stays open: look for outdated ones
@@ -295,14 +302,19 @@ class AppController:
         on_success(f"Connected ({credentials.portal_type.value})")
 
     def _stored_categories(self, credentials: Credentials) -> dict[str, list[PlaylistCategory]] | None:
-        """The account's categories from the search index, if a Recheck or visit stored them."""
+        """The account's categories from the search index or the check that added it."""
         if self._catalog is None or credentials.portal_type != PortalType.XTREAM:
             return None
+        key = catalog_key_for(credentials)
         try:
-            rows = self._catalog.account_categories(catalog_key_for(credentials))
+            rows = self._catalog.account_categories(key)
         except Exception:  # noqa: BLE001 - the server is asked instead
             LOGGER.exception("Could not read stored categories")
             return None
+        if not rows:
+            with self._sighted_lock:
+                sighted = self._sighted.get(key)
+            rows = sighted[3] if sighted else []
         return categories_from_rows(rows) if rows else None
 
     def _stored_connection_info(self, credentials: Credentials) -> dict[str, str]:
@@ -917,7 +929,11 @@ class AppController:
         return signals
 
     def _record_sightings(self, sightings: list[CatalogSighting]) -> None:
-        """Store checked accounts' categories as a partial index (worker thread)."""
+        """Store checked accounts' categories as a partial index (worker thread).
+
+        Accounts not in the catalog yet are kept for ``sync_catalog``, which
+        stores them once the account is added.
+        """
         if self._catalog is None or not sightings:
             return
         records = [
@@ -930,9 +946,12 @@ class AppController:
             for sighting in sightings
         ]
         try:
-            self._catalog.record_categories(records)
+            skipped = set(self._catalog.record_categories(records))
         except Exception:  # noqa: BLE001 - the check itself succeeded
             LOGGER.exception("Could not store the checked accounts' categories")
+            return
+        with self._sighted_lock:
+            self._sighted = {record[0]: record for record in records if record[0] in skipped}
 
     def cancel_bulk_check(self) -> None:
         """Stop an in-flight bulk check."""
@@ -1126,17 +1145,30 @@ class AppController:
         worker.signals.finished.connect(lambda: self._end_activity(token))
         self._thread_pool.start(worker)
 
-    def _indexable(self) -> list[BulkResult]:
-        """The accounts whose catalog is kept: the first ``limit`` up and indexable ones.
+    def _indexable(self, info: dict[str, tuple[float, int]] | None = None) -> list[BulkResult]:
+        """The accounts whose catalog is kept: ``limit`` of the up and indexable ones.
 
-        The list order decides (starred first, then streaming), so starring an
-        account brings it in.
+        Starred accounts come first, then the ones indexed or being indexed,
+        then the list order: a new or re-sorted account fills a free slot but
+        never pushes a catalog out, while starring one brings it in.
+        ``info`` is ``CatalogStore.index_info()`` when the caller has it.
         """
         candidates = [
             account for account in self._config.working_accounts
             if account.portal_type in INDEXED_PORTALS and account.stream_ok is not False
         ]
-        return candidates[: self.index_limit] if self.index_limit else candidates
+        if not self.index_limit or len(candidates) <= self.index_limit:
+            return candidates
+        if info is None:
+            info = self._catalog.index_info() if self._catalog is not None else {}
+
+        def has_slot(account: BulkResult) -> bool:
+            key = catalog_key(account)
+            return key in info or key in self._indexing
+
+        # Stable: the list order breaks ties.
+        ranked = sorted(candidates, key=lambda account: (not account.starred, not has_slot(account)))
+        return ranked[: self.index_limit]
 
     def sync_catalog(self) -> None:
         """Mirror the working accounts into the catalog, then index what is missing.
@@ -1168,12 +1200,26 @@ class AppController:
             for account in self._config.working_accounts
         ]
         indexable = {catalog_key(account) for account in self._indexable()}
+        self._index_wanted = frozenset(indexable)
         # Down accounts keep their catalog for when they come back.
         unindexed = [
             item.key for item in accounts
             if item.alive and item.portal_type in INDEXED_PORTALS and item.key not in indexable
         ]
-        worker = TaskWorker(lambda: catalog.sync_accounts(accounts, unindexed))
+        keys = {item.key for item in accounts}
+        with self._sighted_lock:
+            sighted = [self._sighted.pop(key) for key in list(self._sighted) if key in keys]
+
+        def task() -> None:
+            catalog.sync_accounts(accounts, unindexed)
+            if sighted:
+                # Now that the accounts are in, their check's categories can go in too.
+                try:
+                    catalog.record_categories(sighted)
+                except Exception:  # noqa: BLE001 - opening them asks the server instead
+                    LOGGER.exception("Could not store the added accounts' categories")
+
+        worker = TaskWorker(task)
         worker.signals.succeeded.connect(lambda _result: self._schedule_indexing())
         worker.signals.failed.connect(lambda message: LOGGER.error("Catalog sync failed: %s", message))
         self._thread_pool.start(worker)
@@ -1223,7 +1269,11 @@ class AppController:
         return f"Refreshing the search index of {added} account{'s' if added != 1 else ''}…{note}"
 
     def _enqueue(self, accounts: dict[str, BulkResult], keys: list[str], fresh_after: float) -> int:
-        """Queue ``keys`` not queued yet and start the indexer; how many were added."""
+        """Queue ``keys`` not queued yet and start the indexer; how many were added.
+
+        ``accounts`` are all indexable ones: the indexer drops any other job.
+        """
+        self._index_wanted = frozenset(accounts)
         added = 0
         for key in keys:
             if key not in self._indexing:
@@ -1244,16 +1294,24 @@ class AppController:
             if job is None or stop.is_set():
                 return
             key, credentials, fresh_after = job
+            if key not in self._index_wanted:
+                # Removed or beyond the limit since it was queued.
+                safe_emit(self._index_signals.done, key, "dropped, no longer indexed", "")
+                continue
+
+            def cancelled(key: str = key) -> bool:
+                return stop.is_set() or key not in self._index_wanted
+
             safe_emit(self._index_signals.started, key)
             try:
                 max_age = time.time() - fresh_after
                 if credentials.portal_type == PortalType.M3U:
                     summary = index_m3u_account(
-                        catalog, m3u, service, credentials, key, max_age_seconds=max_age, cancelled=stop.is_set,
+                        catalog, m3u, service, credentials, key, max_age_seconds=max_age, cancelled=cancelled,
                     )
                 else:
                     summary = index_account(
-                        catalog, service, credentials, key, max_age_seconds=max_age, cancelled=stop.is_set,
+                        catalog, service, credentials, key, max_age_seconds=max_age, cancelled=cancelled,
                     )
             except Exception as exc:  # noqa: BLE001 - reported per account, the loop goes on
                 if stop.is_set():
@@ -1303,7 +1361,7 @@ class AppController:
         if self._catalog is None or self._catalog_listener is None:
             return
         info = self._catalog.index_info()
-        indexable = {catalog_key(account) for account in self._indexable()}
+        indexable = {catalog_key(account) for account in self._indexable(info)}
         states = {
             account_key(account): self._index_state(account, catalog_key(account), indexable, info)
             for account in self._config.working_accounts
@@ -1350,7 +1408,7 @@ class AppController:
             limit = self.index_limit
             return (
                 "Not indexed",
-                f"Only the first {limit} working accounts are searchable (starred first).\n"
+                f"Only {limit} working accounts are searchable: starred first, then the ones already indexed.\n"
                 "Star this account or raise the limit under View → Search index.",
                 "text_muted",
             )

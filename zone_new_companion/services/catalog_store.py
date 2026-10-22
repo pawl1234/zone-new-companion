@@ -483,20 +483,23 @@ class CatalogStore:
             self._compact(connection)
         return count
 
-    def record_categories(self, records: Iterable[tuple[str, str, str, list[tuple[str, str, str]]]]) -> None:
+    def record_categories(self, records: Iterable[tuple[str, str, str, list[tuple[str, str, str]]]]) -> list[str]:
         """Remember accounts' categories: a partial index, the basis for a full one.
 
         ``records`` are (account_key, fingerprint, server, categories) with
         categories as in ``replace_source``. Each account is linked to the
         source of its fingerprint, which is created (partial) when new; its
-        streams, if downloaded, stay. Accounts not in the catalog are skipped.
+        streams, if downloaded, stay. Accounts not in the catalog are skipped;
+        their keys are returned.
         """
+        skipped: list[str] = []
         with self._write_lock:
             connection = self._conn()
             connection.execute("BEGIN IMMEDIATE")
             try:
                 for account_key, fingerprint, server, categories in records:
                     if connection.execute("SELECT 1 FROM account WHERE key = ?", (account_key,)).fetchone() is None:
+                        skipped.append(account_key)
                         continue
                     connection.execute(
                         "INSERT INTO source(fingerprint, server) VALUES (?, ?) ON CONFLICT(fingerprint) DO NOTHING",
@@ -515,6 +518,7 @@ class CatalogStore:
                 raise
             if purged:
                 self._compact(connection)
+        return skipped
 
     @staticmethod
     def _replace_categories(

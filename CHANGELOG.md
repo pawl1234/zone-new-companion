@@ -26,7 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The progress count moves as each account finishes instead of waiting for the slowest one ahead of it
   - Recheck fetches each account's category lists and stores them in the search index (a partial index the full download later builds on); accounts with the same categories share them, and the stream test reuses channels already known for that catalog
 - **Opening a working account is instant**: XTREAM accounts open with the categories a Recheck or an earlier visit stored; the server is asked in the background and the list updates when it changed
+  - A newly added account opens with the categories its check already fetched, instead of asking the server again
 - Accounts beyond the search index limit keep their categories; only their streams are left out of the index
+  - Indexed accounts keep their place: a new or re-sorted account waits for a free slot instead of pushing another account's catalog out (starring one still brings it in)
+  - Removing an account, or one dropping beyond the limit, stops its queued or running catalog download
 - **Stream Verification without external tools**: Verify now plays a few seconds of each stream headless through the bundled libmpv and reports *OK (Video+Audio)*, *OK (Video)*, *OK (Audio)* or why it is *OFF* (Unreachable, Timeout, Stalled, No Video/Audio)
   - Without libmpv it reads the stream's container instead (MPEG-TS, MP4, HLS, ADTS) and checks that video and audio packets arrive
   - At most 4 streams are probed at once; streams refused at connect are retried one by one, so accounts limited to one connection verify correctly
