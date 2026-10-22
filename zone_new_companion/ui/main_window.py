@@ -71,6 +71,7 @@ class MainWindow(QMainWindow):
     now_playing_requested = pyqtSignal(str, object)
     back_requested = pyqtSignal(str)
     bulk_check_requested = pyqtSignal()
+    share_import_requested = pyqtSignal()
     working_account_selected = pyqtSignal(object)
     working_accounts_clear_requested = pyqtSignal()
     # Carries the list of accounts to remove.
@@ -238,6 +239,7 @@ class MainWindow(QMainWindow):
         add_menu.addSeparator()
         bulk_action = add_menu.addAction("Bulk import XTREAM URLs…", self.bulk_check_requested.emit)
         theme.bind_icon(bulk_action, "list-plus")
+        add_menu.addAction("Import from base64 string…", self.share_import_requested.emit)
         self.add_account_button.setMenu(add_menu)
         accounts_buttons.addWidget(self.add_account_button)
         self.recheck_accounts_button = QPushButton("Recheck")

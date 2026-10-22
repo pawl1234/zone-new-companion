@@ -50,7 +50,7 @@ class BulkCheckDialog(QDialog):
     # chooses to browse. The main window renders these as a pickable list.
     accounts_chosen = pyqtSignal(object)  # list[BulkResult]
 
-    def __init__(self, controller: "AppController", parent=None) -> None:
+    def __init__(self, controller: "AppController", parent=None, entries: list[str] | None = None) -> None:
         super().__init__(parent)
         self._controller = controller
         self._signals = None
@@ -133,6 +133,11 @@ class BulkCheckDialog(QDialog):
         footer.addWidget(self.browse_button)
         root.addLayout(footer)
         self._update_unreachable_section()
+
+        # Accounts imported from elsewhere are checked right away.
+        if entries:
+            self.input_box.setPlainText("\n".join(entries))
+            self._start()
 
     @staticmethod
     def _make_table(columns: list[str], *, stretch_cols: tuple[int, ...]) -> QTableWidget:

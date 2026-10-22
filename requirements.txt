@@ -2,3 +2,4 @@ PyQt6>=6.7.0
 requests>=2.32.0
 mpv>=1.0.7
 pyinstaller>=6.0.0
+cryptography>=42.0

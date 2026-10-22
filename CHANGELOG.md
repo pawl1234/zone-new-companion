@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Import from base64 string**: *Add → Import from base64 string…* decodes a shared string, shows what's in it and offers to fetch the accounts from the link inside (or to check the accounts it contains directly); the found accounts open in the bulk check right away
+  - paste.sh pastes are decrypted with the key from the link (`#…`), pastebin.com links read the raw paste, other links are downloaded as text
+  - Account blocks with styled letters (`𝙐𝙨𝙚𝙧 : …`, `𝐌𝟑𝐔 : …`) are recognised; titles, notes and duplicates are left out
 - **Search across accounts**: New *Search* tab (Ctrl+F) finds movies, series and live channels in every working XTREAM and M3U account at once, filtered by account (all, starred, the one being browsed) and type
   - Catalogs download in the background into `~/.zone-new-companion/catalog.db` and refresh daily; accounts on the same server with the same packages share one download
   - Accounts that are down (red) drop out of the results right away; removing an account deletes its data

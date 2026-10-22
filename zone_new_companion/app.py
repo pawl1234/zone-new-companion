@@ -24,7 +24,7 @@ if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
 else:
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import QApplication, QInputDialog, QMessageBox
 from PyQt6.QtGui import QIcon
 from PyQt6.QtCore import Qt
 
@@ -35,6 +35,7 @@ from zone_new_companion.services.catalog_store import CatalogStore
 from zone_new_companion.services.bulk_checker import BulkResult, friendly_error, is_server_unavailable
 from zone_new_companion.logging_config import configure_logging
 from zone_new_companion.services.filter_debug import DEBUG_DIR, debug_enabled
+from zone_new_companion.services.share_import import decode_share_string, extract_accounts, find_urls
 from zone_new_companion.models import Credentials, MediaItem, PlaylistCategory, PortalType
 from zone_new_companion.state import StateStore
 from zone_new_companion.ui.main_window import MainWindow
@@ -119,6 +120,7 @@ def run() -> None:
     )
     window.now_playing_requested.connect(lambda tab_name, item: controller.request_now_playing(tab_name, item))
     window.bulk_check_requested.connect(lambda: _open_bulk_check(window, controller, on_error))
+    window.share_import_requested.connect(lambda: _open_share_import(window, controller, on_error))
     window.working_account_selected.connect(
         lambda result: controller.connect_from_bulk(
             result,
@@ -275,8 +277,9 @@ def _open_bulk_check(
     window: MainWindow,
     controller: AppController,
     on_error: Callable[[str], None],
+    entries: list[str] | None = None,
 ) -> None:
-    dialog = BulkCheckDialog(controller, parent=window)
+    dialog = BulkCheckDialog(controller, parent=window, entries=entries)
     # The dialog hands back every working account; the main window renders them
     # as a pickable list and each click loads that account's streams.
     dialog.accounts_chosen.connect(
@@ -286,6 +289,72 @@ def _open_bulk_check(
     dialog.finished.connect(lambda _code: controller.cancel_bulk_check())
     dialog.exec()
 
+
+# Characters of decoded or downloaded text shown in the import message boxes.
+_SHARE_PREVIEW_CHARS = 600
+
+
+def _preview(text: str) -> str:
+    text = text.strip()
+    return text if len(text) <= _SHARE_PREVIEW_CHARS else text[:_SHARE_PREVIEW_CHARS] + "…"
+
+
+def _open_share_import(
+    window: MainWindow,
+    controller: AppController,
+    on_error: Callable[[str], None],
+) -> None:
+    """Decode a shared base64 string, then check the accounts in it or behind its link."""
+    title = "Import from base64 string"
+    raw, ok = QInputDialog.getMultiLineText(window, title, "Paste the base64 string:")
+    if not ok or not raw.strip():
+        return
+    try:
+        decoded = decode_share_string(raw)
+    except ValueError as exc:
+        QMessageBox.warning(window, title, str(exc))
+        return
+
+    accounts = extract_accounts(decoded)
+    urls = find_urls(decoded)
+    box = QMessageBox(window)
+    box.setWindowTitle(title)
+    box.setText("The string decodes to:")
+    box.setDetailedText(decoded)
+    if accounts:
+        question = f"It contains {len(accounts)} account{'s' if len(accounts) != 1 else ''}. Check and add them?"
+    elif urls:
+        question = f"Should I try to fetch accounts from URL:\n{urls[0]}"
+    else:
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setInformativeText(f"{_preview(decoded)}\n\nNo accounts or links found in it.")
+        box.exec()
+        return
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setInformativeText(f"{_preview(decoded)}\n\n{question}")
+    box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+    box.setDefaultButton(QMessageBox.StandardButton.Yes)
+    if box.exec() != QMessageBox.StandardButton.Yes:
+        return
+    if accounts:
+        _open_bulk_check(window, controller, on_error, accounts)
+        return
+
+    def on_fetched(payload: tuple[list[str], str]) -> None:
+        found, text = payload
+        if not found:
+            empty = QMessageBox(window)
+            empty.setIcon(QMessageBox.Icon.Warning)
+            empty.setWindowTitle(title)
+            empty.setText(f"No accounts found at {urls[0]}.")
+            empty.setInformativeText(_preview(text) or "The page is empty.")
+            empty.setDetailedText(text)
+            empty.exec()
+            return
+        window.notify(f"Found {len(found)} account{'s' if len(found) != 1 else ''}, checking them…")
+        _open_bulk_check(window, controller, on_error, found)
+
+    controller.fetch_shared_accounts(urls[0], on_success=on_fetched, on_error=on_error)
 
 def _open_add_account(
     window: MainWindow,

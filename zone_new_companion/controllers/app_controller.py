@@ -48,6 +48,7 @@ from zone_new_companion.services.filter_debug import FilterDebugDumper, debug_en
 from zone_new_companion.services.hls_probe import find_hls_url
 from zone_new_companion.services.m3u_service import M3UService
 from zone_new_companion.services.player_launcher import launch_stream
+from zone_new_companion.services.share_import import extract_accounts, fetch_shared_text
 from zone_new_companion.services.stalker_service import StalkerService
 from zone_new_companion.services.stream_verifier import StreamVerifier
 from zone_new_companion.services.xtream_service import XtreamService, stream_url_for
@@ -930,6 +931,25 @@ class AppController:
         """
         lines = raw_text.splitlines()
         return self._run_check(lambda checker, progress: checker.check_many(lines, progress_cb=progress))
+
+    def fetch_shared_accounts(
+        self,
+        url: str,
+        on_success: Callable[[tuple[list[str], str]], None],
+        on_error: Callable[[str], None],
+    ) -> None:
+        """Download a shared paste and hand back (account entries, paste text)."""
+        token = self._begin_activity(f"Downloading {url}…")
+
+        def task() -> tuple[list[str], str]:
+            text = fetch_shared_text(url)
+            return extract_accounts(text), text
+
+        worker = TaskWorker(task)
+        worker.signals.succeeded.connect(on_success)
+        worker.signals.failed.connect(on_error)
+        worker.signals.finished.connect(lambda: self._end_activity(token))
+        self._thread_pool.start(worker)
 
     def _run_check(
         self,
