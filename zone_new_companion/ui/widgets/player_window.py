@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import locale
 import logging
+import sys
 import time
 from types import ModuleType
 
@@ -42,6 +43,10 @@ _MAX_RETRIES = 15
 _STABLE_S = 30
 _TICK_MS = 250
 _HIDE_CONTROLS_MS = 2500
+# On Windows, an OpenGL window that exactly covers a monitor is switched by the
+# driver into exclusive fullscreen, which blanks and freezes the picture each
+# time the controls hide or show. A 1 px gap keeps the video windowed.
+_FULLSCREEN_GAP = 1 if sys.platform == "win32" else 0
 
 # mpv's end-file reasons (MpvEventEndFile).
 _EOF = 0
@@ -225,11 +230,11 @@ class PlayerWindow(QWidget):
         video_box.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._controls = self._build_controls()
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(video_box, 1)
-        layout.addWidget(self._controls)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(0)
+        self._layout.addWidget(video_box, 1)
+        self._layout.addWidget(self._controls)
 
         self._tick_timer = QTimer(self)
         self._tick_timer.setInterval(_TICK_MS)
@@ -466,11 +471,13 @@ class PlayerWindow(QWidget):
             self._hide_timer.start()
 
     def _show_controls(self) -> None:
+        self._layout.setContentsMargins(0, 0, 0, 0)
         self._controls.show()
         self._video.unsetCursor()
 
     def _hide_controls(self) -> None:
         if self.isFullScreen():
+            self._layout.setContentsMargins(0, 0, 0, _FULLSCREEN_GAP)
             self._controls.hide()
             self._video.setCursor(QCursor(Qt.CursorShape.BlankCursor))
 
