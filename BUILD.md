@@ -28,6 +28,7 @@ cross-compile.
   and caches `libmpv-2.dll` in `build\libmpv`. Unpacking it needs 7-Zip
   (`winget install 7zip.7zip`) or Windows 11's `tar`. `-Libmpv <path>`
   bundles a DLL you already have; `-NoLibmpv` builds without the built-in player.
+  What goes into the exe is set in `scripts\windows.spec`.
 - **macOS** bundles Homebrew's libmpv (`brew install mpv`) with its dependencies.
   The app runs on the build Mac's architecture and macOS version or newer.
   `--no-libmpv` and `--no-dmg` skip those parts.
@@ -116,19 +117,11 @@ source alongside it.
    pip install pyinstaller
    ```
 
-5. **Build executable**:
+5. **Build executable** (`scripts\windows.spec` sets what goes into the exe and
+   leaves out Qt files the app never uses; omit `-- --libmpv ...` to build without
+   the built-in player):
    ```powershell
-   pyinstaller --noconfirm --clean --onefile --windowed `
-     --name zone-new-companion `
-     --icon zone_new_companion\icon\icon.ico `
-     --add-data "zone_new_companion\icon\icon.ico;zone_new_companion/icon" `
-     --add-data "media;media" `
-     --add-data "zone_new_companion\ui\theme;zone_new_companion/ui/theme" `
-     --hidden-import mpv `
-     --add-binary "libmpv-2.dll;." `
-     --exclude-module matplotlib `
-     --exclude-module scipy `
-     main.py
+   pyinstaller --noconfirm --clean scripts\windows.spec -- --libmpv C:\path\to\libmpv-2.dll
    ```
 
 6. **Output location**: `dist\zone-new-companion.exe`

@@ -30,6 +30,7 @@ logs/
 # PyInstaller
 *.manifest
 *.spec
+!/scripts/windows.spec
 
 # Testing
 .pytest_cache/

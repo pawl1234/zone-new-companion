@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Smaller Windows executable** (about 15 MB less): the build leaves out files the app never uses: Qt's software OpenGL (`opengl32sw.dll`), Qt PDF, Qt translations, unused image formats, the README screenshots and setuptools; Python code is built with docstrings removed
+  - On machines without an OpenGL driver (some VMs and remote desktop sessions) the built-in player cannot start; streams play in VLC there
+
 ## [2.0.1] - 2026-10-22
 
 ### Fixed

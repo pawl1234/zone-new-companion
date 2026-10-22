@@ -126,24 +126,15 @@ try {
     Invoke-Checked $venvPython @('-m', 'pip', 'install', '--quiet', '--upgrade', 'pip')
     Invoke-Checked $venvPython @('-m', 'pip', 'install', '--quiet', '-r', 'requirements.txt')
 
-    $pyinstallerArgs = @(
-        '-m', 'PyInstaller', '--noconfirm', '--clean', '--onefile', '--windowed',
-        '--name', $Name,
-        '--icon', 'zone_new_companion\icon\icon.ico',
-        '--add-data', 'zone_new_companion\icon\icon.ico;zone_new_companion/icon',
-        '--add-data', 'media;media',
-        '--add-data', 'zone_new_companion\ui\theme;zone_new_companion/ui/theme',
-        '--hidden-import', 'mpv'
-    )
+    # What goes into the exe is set in the spec file; the options after -- are its own.
+    $pyinstallerArgs = @('-m', 'PyInstaller', '--noconfirm', '--clean', 'scripts\windows.spec', '--')
     if ($NoLibmpv) {
         Write-Warning 'Building without libmpv: the built-in player is off, streams play in VLC.'
     } else {
         if (-not $Libmpv) { $Libmpv = Get-Libmpv }
         if (-not (Test-Path $Libmpv)) { throw "libmpv not found at $Libmpv" }
-        # Bundled under the name python-mpv looks for; extracted to _MEIPASS at startup.
-        $pyinstallerArgs += @('--add-binary', "$((Resolve-Path $Libmpv).Path);.")
+        $pyinstallerArgs += @('--libmpv', (Resolve-Path $Libmpv).Path)
     }
-    $pyinstallerArgs += 'main.py'
 
     Write-Host 'Running PyInstaller...'
     Invoke-Checked $venvPython $pyinstallerArgs
