@@ -2,80 +2,44 @@
 
 from __future__ import annotations
 
-from typing import Any
-
-from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QModelIndex, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QMenu,
-    QTableView,
+    QPushButton,
+    QSpinBox,
+    QTreeView,
     QVBoxLayout,
     QWidget,
 )
 
-from zone_new_companion.services.catalog_store import RESULT_LIMIT, SearchHit
-from zone_new_companion.ui.theme import set_role, theme
+from zone_new_companion.services.catalog_store import SearchFilters, SearchGroup, SearchHit, SearchResult
+from zone_new_companion.ui.theme import set_role, set_variant, theme
 
-NAME_COL, TYPE_COL, CATEGORY_COL, ACCOUNT_COL = range(4)
-_HEADERS = ["Name", "Type", "Category", "Account"]
+TITLE_COL, YEAR_COL, TYPE_COL, QUALITY_COL, LANGUAGE_COL, WHERE_COL = range(6)
+_HEADERS = ["Title", "Year", "Type", "Quality", "Language", "Where"]
 _KIND_LABELS = {"live": "Live", "movies": "Movie", "series": "Series"}
 # Typing pauses this long before a search runs.
 _DEBOUNCE_MS = 250
-
-
-class SearchResultsModel(QAbstractTableModel):
-    """Search hits, one row per stream and account."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._hits: list[SearchHit] = []
-
-    def set_hits(self, hits: list[SearchHit]) -> None:
-        self.beginResetModel()
-        self._hits = list(hits)
-        self.endResetModel()
-
-    def refresh(self) -> None:
-        """Repaint after a theme change."""
-        if self._hits:
-            self.dataChanged.emit(self.index(0, 0), self.index(len(self._hits) - 1, len(_HEADERS) - 1))
-
-    def hit_at(self, row: int) -> SearchHit | None:
-        return self._hits[row] if 0 <= row < len(self._hits) else None
-
-    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
-        return 0 if parent.isValid() else len(self._hits)
-
-    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
-        return 0 if parent.isValid() else len(_HEADERS)
-
-    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.ItemDataRole.DisplayRole) -> Any:  # noqa: N802
-        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
-            return _HEADERS[section]
-        return None
-
-    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole) -> Any:
-        hit = self.hit_at(index.row())
-        if hit is None:
-            return None
-        column = index.column()
-        if role == Qt.ItemDataRole.DisplayRole:
-            return (hit.name, _KIND_LABELS.get(hit.kind, hit.kind), hit.category, hit.account_label)[column]
-        if role == Qt.ItemDataRole.ForegroundRole and column != NAME_COL:
-            return theme.color("text_muted")
-        if role == Qt.ItemDataRole.ToolTipRole and column == NAME_COL:
-            return "Double-click to play" if hit.kind != "series" else "Double-click to open the seasons"
-        return None
+# Spin box value meaning "any year".
+_ANY_YEAR = 1899
+# Each item's UserRole holds its SearchGroup (top level) or SearchHit (child).
+_PAYLOAD = Qt.ItemDataRole.UserRole
+# Row height matching the browse tables.
+_ROW_HEIGHT = 32
 
 
 class SearchPanel(QWidget):
-    """Search box, scope and type filters, and the hits."""
+    """Search box, scope/type/sort, a filter bar and the hits grouped by title."""
 
-    # (text, scope "all"|"starred"|"active", kind "live"|"movies"|"series"|None)
+    # (text, scope "all"|"starred"|"active", SearchFilters)
     search_requested = pyqtSignal(str, str, object)
     # (SearchHit, open in VLC)
     hit_play_requested = pyqtSignal(object, bool)
@@ -106,38 +70,59 @@ class SearchPanel(QWidget):
         self.kind_combo.addItem("Series", "series")
         self.kind_combo.addItem("Live", "live")
         controls.addWidget(self.kind_combo)
+        self.sort_combo = QComboBox()
+        for label, key in (
+            ("Best match", "relevance"),
+            ("Newest year", "year"),
+            ("Recently added", "added"),
+            ("Most accounts", "accounts"),
+            ("Title A–Z", "title"),
+        ):
+            self.sort_combo.addItem(label, key)
+        self.sort_combo.setToolTip("Order of the results")
+        controls.addWidget(self.sort_combo)
+        self.filters_button = set_variant(QPushButton("Filters"), "ghost")
+        self.filters_button.setCheckable(True)
+        self.filters_button.setToolTip("Quality, year, date added, category and account filters")
+        controls.addWidget(self.filters_button)
         layout.addLayout(controls)
+
+        self.filter_bar = self._build_filter_bar()
+        self.filter_bar.hide()
+        self.filters_button.toggled.connect(self.filter_bar.setVisible)
+        layout.addWidget(self.filter_bar)
 
         self.status_label = set_role(QLabel(""), "muted")
         self.status_label.setToolTip(
             "Every working XTREAM account's catalog is downloaded in the background\n"
-            "and refreshed daily. Accounts on the same server share one download.",
+            "and refreshed daily. Accounts on the same server share one download.\n"
+            "The Language setting above the tabs applies to the search as well.",
         )
         layout.addWidget(self.status_label)
 
-        self.model = SearchResultsModel()
-        self.table = QTableView()
-        self.table.setModel(self.model)
-        self.table.setAlternatingRowColors(True)
-        self.table.setShowGrid(False)
-        self.table.setIconSize(QSize(14, 14))
-        self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QTableView.SelectionMode.SingleSelection)
-        self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-        self.table.verticalHeader().setDefaultSectionSize(34)
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(NAME_COL, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(TYPE_COL, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(CATEGORY_COL, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(ACCOUNT_COL, QHeaderView.ResizeMode.Interactive)
-        header.resizeSection(CATEGORY_COL, 220)
-        header.resizeSection(ACCOUNT_COL, 260)
-        self.table.doubleClicked.connect(self._on_double_clicked)
-        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self._show_menu)
-        layout.addWidget(self.table, 1)
+        self.model = QStandardItemModel(0, len(_HEADERS))
+        self.model.setHorizontalHeaderLabels(_HEADERS)
+        self.tree = QTreeView()
+        self.tree.setModel(self.model)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setIconSize(QSize(14, 14))
+        self.tree.setEditTriggers(QTreeView.EditTrigger.NoEditTriggers)
+        self.tree.setSelectionBehavior(QTreeView.SelectionBehavior.SelectRows)
+        self.tree.setSelectionMode(QTreeView.SelectionMode.SingleSelection)
+        # Double-click plays; the arrow (or a click on it) opens the accounts.
+        self.tree.setExpandsOnDoubleClick(False)
+        header = self.tree.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(TITLE_COL, QHeaderView.ResizeMode.Stretch)
+        for col in (YEAR_COL, TYPE_COL, QUALITY_COL, LANGUAGE_COL):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(WHERE_COL, QHeaderView.ResizeMode.Interactive)
+        header.resizeSection(WHERE_COL, 300)
+        self.tree.doubleClicked.connect(self._on_double_clicked)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._show_menu)
+        layout.addWidget(self.tree, 1)
 
         self.empty_label = set_role(QLabel(""), "empty")
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -150,49 +135,230 @@ class SearchPanel(QWidget):
         self._debounce.timeout.connect(self._emit_search)
         self.query_edit.textChanged.connect(lambda _text: self._debounce.start())
         self.query_edit.returnPressed.connect(self._emit_search)
-        self.scope_combo.currentIndexChanged.connect(lambda _index: self._emit_search())
-        self.kind_combo.currentIndexChanged.connect(lambda _index: self._emit_search())
+        for combo in (self.scope_combo, self.kind_combo, self.sort_combo):
+            combo.currentIndexChanged.connect(lambda _index: self._emit_search())
+        self._last_result = SearchResult([])
+        self._catalog_status = ""
         theme.changed.connect(self._on_theme_changed)
+
+    def _build_filter_bar(self) -> QFrame:
+        bar = set_role(QFrame(), "card")
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(12, 8, 12, 8)
+        row.setSpacing(10)
+
+        self.quality_combo = QComboBox()
+        for label, key in (("Any quality", ""), ("SD or better", "SD"), ("HD or better", "HD"),
+                           ("FHD or better", "FHD"), ("4K only", "4K")):
+            self.quality_combo.addItem(label, key)
+        self.quality_combo.setToolTip("Taken from tags like 4K, UHD, FHD, 1080p, HD in the name or category")
+        row.addWidget(self.quality_combo)
+
+        row.addWidget(set_role(QLabel("Year"), "muted"))
+        self.year_from_spin = self._year_spin("from")
+        row.addWidget(self.year_from_spin)
+        row.addWidget(set_role(QLabel("–"), "muted"))
+        self.year_to_spin = self._year_spin("to")
+        row.addWidget(self.year_to_spin)
+
+        self.added_combo = QComboBox()
+        for label, days in (("Added any time", 0), ("Added last 7 days", 7), ("Added last 30 days", 30),
+                            ("Added last 90 days", 90)):
+            self.added_combo.addItem(label, days)
+        row.addWidget(self.added_combo)
+
+        self.category_edit = QLineEdit()
+        self.category_edit.setPlaceholderText("Category contains…")
+        self.category_edit.setClearButtonEnabled(True)
+        self.category_edit.setMaximumWidth(180)
+        row.addWidget(self.category_edit)
+
+        self.tested_check = QCheckBox("Streaming")
+        self.tested_check.setToolTip("Only accounts whose last Recheck could actually play a stream (green)")
+        row.addWidget(self.tested_check)
+        self.free_check = QCheckBox("Free connection")
+        self.free_check.setToolTip("Only accounts with fewer active connections than allowed")
+        row.addWidget(self.free_check)
+        self.expiry_combo = QComboBox()
+        for label, days in (("Any expiry", 0), ("Valid 7+ days", 7), ("Valid 30+ days", 30)):
+            self.expiry_combo.addItem(label, days)
+        self.expiry_combo.setToolTip("Leave out accounts that expire sooner")
+        row.addWidget(self.expiry_combo)
+        row.addStretch(1)
+        reset = set_variant(QPushButton("Reset"), "ghost")
+        reset.clicked.connect(self._reset_filters)
+        row.addWidget(reset)
+
+        for combo in (self.quality_combo, self.added_combo, self.expiry_combo):
+            combo.currentIndexChanged.connect(lambda _index: self._filters_changed())
+        for spin in (self.year_from_spin, self.year_to_spin):
+            spin.valueChanged.connect(lambda _value: self._filters_changed(debounce=True))
+        self.category_edit.textChanged.connect(lambda _text: self._filters_changed(debounce=True))
+        for check in (self.tested_check, self.free_check):
+            check.toggled.connect(lambda _checked: self._filters_changed())
+        return bar
+
+    @staticmethod
+    def _year_spin(label: str) -> QSpinBox:
+        spin = QSpinBox()
+        spin.setRange(_ANY_YEAR, 2100)
+        spin.setSpecialValueText("any")
+        spin.setValue(_ANY_YEAR)
+        spin.setToolTip(f"Release year {label} (titles without a year are left out once set)")
+        return spin
 
     def focus_search(self) -> None:
         self.query_edit.setFocus()
         self.query_edit.selectAll()
 
     def refresh(self) -> None:
-        """Run the current search again (e.g. after accounts changed)."""
+        """Run the current search again (e.g. after accounts or the language changed)."""
         if len(self.query_edit.text().strip()) >= 2:
             self._emit_search()
 
     def set_status(self, text: str) -> None:
-        self.status_label.setText(text)
+        self._catalog_status = text
+        self._update_status()
 
-    def show_hits(self, hits: list[SearchHit]) -> None:
-        self.model.set_hits(hits)
-        self.table.scrollToTop()
-        if hits:
-            self.table.show()
+    def filters(self) -> SearchFilters:
+        """The filter bar's settings (scope and language are added by the controller)."""
+        year_from, year_to = self.year_from_spin.value(), self.year_to_spin.value()
+        return SearchFilters(
+            kind=self.kind_combo.currentData(),
+            min_quality=self.quality_combo.currentData(),
+            year_from=0 if year_from == _ANY_YEAR else year_from,
+            year_to=0 if year_to == _ANY_YEAR else year_to,
+            added_within_days=self.added_combo.currentData(),
+            category_text=self.category_edit.text(),
+            stream_tested_only=self.tested_check.isChecked(),
+            valid_for_days=self.expiry_combo.currentData(),
+            free_slots_only=self.free_check.isChecked(),
+            sort=self.sort_combo.currentData(),
+        )
+
+    def show_result(self, result: SearchResult) -> None:
+        self._last_result = result
+        self.model.removeRows(0, self.model.rowCount())
+        for group in result.groups:
+            self.model.appendRow(self._group_row(group))
+        self._update_status()
+        if result.groups:
+            self.tree.show()
             self.empty_label.hide()
+            self.tree.scrollToTop()
         else:
-            self._show_empty("Nothing found in the searchable accounts.")
-        if len(hits) >= RESULT_LIMIT:
-            self.status_label.setText(f"Showing the best {RESULT_LIMIT} hits - type more to narrow it down")
+            self._show_empty("Nothing found in the searchable accounts" + (
+                " with these filters." if self._active_filter_count() else "."
+            ))
+
+    def _group_row(self, group: SearchGroup) -> list[QStandardItem]:
+        count = group.account_count
+        where = group.hits[0].account_label if count == 1 else f"{count} accounts"
+        row = self._row(
+            group.title,
+            str(group.year) if group.year else "",
+            _KIND_LABELS.get(group.kind, group.kind),
+            " · ".join(group.qualities),
+            " · ".join(group.languages),
+            where,
+        )
+        row[0].setData(group, _PAYLOAD)
+        best = group.best
+        row[0].setToolTip(
+            ("Double-click to open the seasons" if group.kind == "series" else "Double-click to play")
+            + f" on {best.account_label}" + ("" if count == 1 else " (the best account; expand to pick another)"),
+        )
+        # One copy on one account needs no list to pick from.
+        if len(group.hits) > 1:
+            for hit in sorted(group.hits, key=lambda hit: hit.play_rank):
+                row[0].appendRow(self._hit_row(hit))
+        return row
+
+    def _hit_row(self, hit: SearchHit) -> list[QStandardItem]:
+        where = ("★ " if hit.starred else "") + hit.account_label + (f" — {hit.category}" if hit.category else "")
+        row = self._row(hit.name, str(hit.year) if hit.year else "", "", hit.quality, hit.languages, where)
+        row[0].setData(hit, _PAYLOAD)
+        stream = {True: "streams OK", False: "not streaming", None: "streams not tested"}[hit.stream_ok]
+        slots = {True: "free connection", False: "all connections in use", None: "connections unknown"}[hit.free_slots]
+        tip = f"{hit.account_label}\n{stream} · {slots}"
+        for item in row:
+            item.setForeground(theme.color("text_muted"))
+            item.setToolTip(tip)
+        return row
+
+    @staticmethod
+    def _row(*texts: str) -> list[QStandardItem]:
+        items = [QStandardItem(text) for text in texts]
+        for item in items:
+            item.setEditable(False)
+        items[0].setSizeHint(QSize(0, _ROW_HEIGHT))
+        return items
+
+    def _update_status(self) -> None:
+        text = self._catalog_status
+        if self._last_result.truncated:
+            text += f" · showing the best {len(self._last_result.groups)} titles - type more to narrow it down"
+        self.status_label.setText(text)
+        active = self._active_filter_count()
+        self.filters_button.setText(f"Filters ({active})" if active else "Filters")
+
+    def _active_filter_count(self) -> int:
+        filters = self.filters()
+        return sum(
+            bool(value) for value in (
+                filters.min_quality, filters.year_from or filters.year_to, filters.added_within_days,
+                filters.category_text.strip(), filters.stream_tested_only, filters.valid_for_days,
+                filters.free_slots_only,
+            )
+        )
+
+    def _reset_filters(self) -> None:
+        widgets = (self.quality_combo, self.added_combo, self.expiry_combo, self.year_from_spin,
+                   self.year_to_spin, self.category_edit, self.tested_check, self.free_check)
+        for widget in widgets:
+            widget.blockSignals(True)
+        self.quality_combo.setCurrentIndex(0)
+        self.added_combo.setCurrentIndex(0)
+        self.expiry_combo.setCurrentIndex(0)
+        self.year_from_spin.setValue(_ANY_YEAR)
+        self.year_to_spin.setValue(_ANY_YEAR)
+        self.category_edit.clear()
+        self.tested_check.setChecked(False)
+        self.free_check.setChecked(False)
+        for widget in widgets:
+            widget.blockSignals(False)
+        self._filters_changed()
+
+    def _filters_changed(self, debounce: bool = False) -> None:
+        self._update_status()
+        if debounce:
+            self._debounce.start()
+        else:
+            self._emit_search()
 
     def _show_empty(self, text: str) -> None:
         self.empty_label.setText(text)
         self.empty_label.show()
-        self.table.hide()
+        self.tree.hide()
 
     def _emit_search(self) -> None:
         self._debounce.stop()
         text = self.query_edit.text().strip()
         if len(text) < 2:
-            self.model.set_hits([])
+            self.model.removeRows(0, self.model.rowCount())
+            self._last_result = SearchResult([])
+            self._update_status()
             self._show_empty("Type at least two letters to search.")
             return
-        self.search_requested.emit(text, self.scope_combo.currentData(), self.kind_combo.currentData())
+        self.search_requested.emit(text, self.scope_combo.currentData(), self.filters())
+
+    def _hit_at(self, index: QModelIndex) -> SearchHit | None:
+        """The hit a row stands for: a group plays its best account."""
+        payload = index.siblingAtColumn(TITLE_COL).data(_PAYLOAD) if index.isValid() else None
+        return payload.best if isinstance(payload, SearchGroup) else payload
 
     def _on_double_clicked(self, index: QModelIndex) -> None:
-        hit = self.model.hit_at(index.row())
+        hit = self._hit_at(index)
         if hit is None:
             return
         if hit.kind == "series":
@@ -201,19 +367,28 @@ class SearchPanel(QWidget):
             self.hit_play_requested.emit(hit, False)
 
     def _show_menu(self, pos) -> None:
-        index = self.table.indexAt(pos)
-        hit = self.model.hit_at(index.row()) if index.isValid() else None
+        index = self.tree.indexAt(pos)
+        hit = self._hit_at(index)
         if hit is None:
             return
-        menu = QMenu(self.table)
+        menu = QMenu(self.tree)
         if hit.kind == "series":
-            menu.addAction("Open seasons", lambda: self.hit_open_requested.emit(hit))
+            menu.addAction(f"Open seasons on {hit.account_label}", lambda: self.hit_open_requested.emit(hit))
         else:
-            menu.addAction("Play", lambda: self.hit_play_requested.emit(hit, False))
+            menu.addAction(f"Play on {hit.account_label}", lambda: self.hit_play_requested.emit(hit, False))
             menu.addAction("Open in VLC", lambda: self.hit_play_requested.emit(hit, True))
             menu.addAction("Browse this account", lambda: self.hit_open_requested.emit(hit))
-        menu.exec(self.table.viewport().mapToGlobal(pos))
+        title_index = index.siblingAtColumn(TITLE_COL)
+        if self.model.hasChildren(title_index):
+            menu.addSeparator()
+            expanded = self.tree.isExpanded(title_index)
+            menu.addAction(
+                "Hide accounts" if expanded else "Show all accounts",
+                lambda: self.tree.setExpanded(title_index, not expanded),
+            )
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
 
     def _on_theme_changed(self) -> None:
         self._search_action.setIcon(theme.icon("search"))
-        self.model.refresh()
+        self.show_result(self._last_result)
+

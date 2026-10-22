@@ -13,15 +13,21 @@ import re
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from zone_new_companion.services.title_parser import QUALITY_RANK
+
 LOGGER = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
-# Search hits returned at most; one hit per item and account.
-RESULT_LIMIT = 500
+# 2: parsed titles, languages and account health for grouping and filters.
+SCHEMA_VERSION = 2
+# Matching rows (stream x account) read per search, best first; they are
+# grouped into at most GROUP_LIMIT titles.
+ROW_LIMIT = 5000
+GROUP_LIMIT = 300
+SORTS = ("relevance", "year", "added", "accounts", "title")
 
 _SCHEMA = """
 CREATE TABLE source (
@@ -37,6 +43,10 @@ CREATE TABLE account (
     label TEXT NOT NULL,
     alive INTEGER NOT NULL,
     starred INTEGER NOT NULL,
+    stream_ok INTEGER,
+    expires_at REAL,
+    max_conn INTEGER,
+    active_conn INTEGER,
     source_id INTEGER REFERENCES source(id) ON DELETE SET NULL
 );
 CREATE INDEX account_source ON account(source_id);
@@ -54,6 +64,14 @@ CREATE TABLE item (
     provider_id TEXT NOT NULL,
     category_id TEXT NOT NULL,
     name TEXT NOT NULL,
+    title TEXT NOT NULL,
+    title_norm TEXT NOT NULL,
+    year INTEGER NOT NULL,
+    quality TEXT NOT NULL,
+    quality_rank INTEGER NOT NULL,
+    -- Country codes as " DE MULTI " ('' = untagged), see country_filter.
+    item_langs TEXT NOT NULL,
+    cat_langs TEXT NOT NULL,
     extension TEXT NOT NULL,
     icon TEXT NOT NULL,
     added_at INTEGER NOT NULL
@@ -84,19 +102,52 @@ class CatalogAccount:
     label: str
     alive: bool
     starred: bool
+    stream_ok: bool | None = None
+    expires_at: float | None = None  # None: unlimited or unknown
+    max_conn: int | None = None
+    active_conn: int | None = None
 
 
 @dataclass(slots=True)
 class CatalogItem:
-    """One stream as downloaded from a server."""
+    """One stream as downloaded from a server, with its parsed name."""
 
     kind: str  # "live" | "movies" | "series"
     provider_id: str
     category_id: str
     name: str
+    title: str = ""
+    title_norm: str = ""
+    year: int = 0
+    quality: str = ""
+    item_langs: frozenset[str] = frozenset()
+    cat_langs: frozenset[str] = frozenset()
     extension: str = ""
     icon: str = ""
     added_at: int = 0
+
+
+@dataclass(slots=True)
+class SearchFilters:
+    """What a search is narrowed to; the defaults filter nothing."""
+
+    kind: str | None = None
+    account_key: str | None = None
+    starred_only: bool = False
+    # Wanted country codes (country_filter.codes_for_language); empty = all.
+    languages: frozenset[str] = frozenset()
+    # Hide untagged entries too, like the browse tabs' "Hide untagged".
+    language_strict: bool = False
+    min_quality: str = ""
+    year_from: int = 0
+    year_to: int = 0
+    added_within_days: int = 0
+    category_text: str = ""
+    stream_tested_only: bool = False
+    # Leave out accounts expiring sooner than this.
+    valid_for_days: int = 0
+    free_slots_only: bool = False
+    sort: str = "relevance"
 
 
 @dataclass(slots=True)
@@ -108,10 +159,63 @@ class SearchHit:
     kind: str
     provider_id: str
     name: str
+    title: str
+    title_norm: str
+    year: int
+    quality: str
+    languages: str  # "DE MULTI"; the item's own tags, else its category's
     category: str
     extension: str
     icon: str
     added_at: int
+    starred: bool
+    stream_ok: bool | None
+    free_slots: bool | None  # None: the server does not say
+
+    @property
+    def play_rank(self) -> tuple:
+        """Lower plays first: starred, streaming, free slot, best quality."""
+        stream = {True: 0, None: 1, False: 2}[self.stream_ok]
+        return (not self.starred, stream, self.free_slots is False, -QUALITY_RANK.get(self.quality, 0))
+
+
+@dataclass(slots=True)
+class SearchGroup:
+    """One title (same kind, normalized title and year) across accounts."""
+
+    kind: str
+    title: str
+    year: int
+    hits: list[SearchHit] = field(default_factory=list)
+    # Position of its best hit in relevance order.
+    relevance: int = 0
+
+    @property
+    def best(self) -> SearchHit:
+        return min(self.hits, key=lambda hit: hit.play_rank)
+
+    @property
+    def account_count(self) -> int:
+        return len({hit.account_key for hit in self.hits})
+
+    @property
+    def qualities(self) -> list[str]:
+        return sorted({hit.quality for hit in self.hits if hit.quality}, key=lambda q: -QUALITY_RANK[q])
+
+    @property
+    def languages(self) -> list[str]:
+        return sorted({code for hit in self.hits for code in hit.languages.split()})
+
+    @property
+    def added_at(self) -> int:
+        return max(hit.added_at for hit in self.hits)
+
+
+@dataclass(slots=True)
+class SearchResult:
+    groups: list[SearchGroup]
+    # More matched than was read or shown: typing more narrows it down.
+    truncated: bool = False
 
 
 @dataclass(slots=True)
@@ -177,7 +281,13 @@ class CatalogStore:
 
     def sync_accounts(self, accounts: Iterable[CatalogAccount]) -> None:
         """Mirror the working-accounts list; removed accounts and their orphaned data go."""
-        rows = [(a.key, a.portal_type, a.label, int(a.alive), int(a.starred)) for a in accounts]
+        rows = [
+            (
+                a.key, a.portal_type, a.label, int(a.alive), int(a.starred),
+                None if a.stream_ok is None else int(a.stream_ok), a.expires_at, a.max_conn, a.active_conn,
+            )
+            for a in accounts
+        ]
         with self._write_lock:
             connection = self._conn()
             connection.execute("BEGIN IMMEDIATE")
@@ -187,9 +297,12 @@ class CatalogStore:
                 connection.executemany("INSERT OR IGNORE INTO keep VALUES (?)", [(row[0],) for row in rows])
                 connection.execute("DELETE FROM account WHERE key NOT IN (SELECT key FROM keep)")
                 connection.executemany(
-                    "INSERT INTO account(key, portal_type, label, alive, starred) VALUES (?, ?, ?, ?, ?) "
+                    "INSERT INTO account(key, portal_type, label, alive, starred, stream_ok, expires_at, "
+                    "max_conn, active_conn) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(key) DO UPDATE SET portal_type = excluded.portal_type, "
-                    "label = excluded.label, alive = excluded.alive, starred = excluded.starred",
+                    "label = excluded.label, alive = excluded.alive, starred = excluded.starred, "
+                    "stream_ok = excluded.stream_ok, expires_at = excluded.expires_at, "
+                    "max_conn = excluded.max_conn, active_conn = excluded.active_conn",
                     rows,
                 )
                 purged = self._purge_orphans(connection)
@@ -287,10 +400,15 @@ class CatalogStore:
                     ((source_id, kind, provider_id, name) for kind, provider_id, name in categories),
                 )
                 cursor = connection.executemany(
-                    "INSERT INTO item(source_id, kind, provider_id, category_id, name, extension, icon, added_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO item(source_id, kind, provider_id, category_id, name, title, title_norm, year, "
+                    "quality, quality_rank, item_langs, cat_langs, extension, icon, added_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        (source_id, i.kind, i.provider_id, i.category_id, i.name, i.extension, i.icon, i.added_at)
+                        (
+                            source_id, i.kind, i.provider_id, i.category_id, i.name, i.title or i.name,
+                            i.title_norm, i.year, i.quality, QUALITY_RANK.get(i.quality, 0),
+                            _codes(i.item_langs), _codes(i.cat_langs), i.extension, i.icon, i.added_at,
+                        )
                         for i in items
                     ),
                 )
@@ -311,55 +429,52 @@ class CatalogStore:
 
     # Search -------------------------------------------------------------------
 
-    def search(
-        self,
-        text: str,
-        *,
-        kind: str | None = None,
-        account_key: str | None = None,
-        starred_only: bool = False,
-        limit: int = RESULT_LIMIT,
-    ) -> list[SearchHit]:
-        """Streams whose name contains every word of ``text`` (as word prefixes).
+    def search(self, text: str, filters: SearchFilters | None = None) -> SearchResult:
+        """Titles whose stream names contain every word of ``text`` (as word prefixes).
 
-        Only accounts that are currently up are searched.
+        Only accounts that are currently up are searched. Equal titles on
+        several accounts (or listed twice) come back as one group.
         """
+        filters = filters or SearchFilters()
         words = _words(text)
         if not words:
-            return []
-        filters = ["a.alive = 1"]
+            return SearchResult([])
+        where = ["a.alive = 1"]
         params: list[object] = []
         if self.has_fts:
             source = "item_fts f JOIN item i ON i.id = f.rowid"
-            filters.insert(0, "item_fts MATCH ?")
+            where.insert(0, "item_fts MATCH ?")
             params.append(" ".join(f'"{word}"*' for word in words))
             order = "bm25(item_fts), i.name"
         else:
             source = "item i"
             for word in words:
-                filters.append("i.name LIKE ?")
+                where.append("i.name LIKE ?")
                 params.append(f"%{word}%")
             order = "length(i.name), i.name"
-        if kind:
-            filters.append("i.kind = ?")
-            params.append(kind)
-        if account_key:
-            filters.append("a.key = ?")
-            params.append(account_key)
-        if starred_only:
-            filters.append("a.starred = 1")
-        params.append(limit)
+        _add_filters(filters, where, params)
+        params.append(ROW_LIMIT)
         rows = self._conn().execute(
-            f"SELECT a.key, a.label, i.kind, i.provider_id, i.name, COALESCE(c.name, ''), "
-            f"i.extension, i.icon, i.added_at "
+            f"SELECT a.key, a.label, i.kind, i.provider_id, i.name, i.title, i.title_norm, i.year, i.quality, "
+            f"CASE WHEN i.item_langs != '' THEN i.item_langs ELSE i.cat_langs END, COALESCE(c.name, ''), "
+            f"i.extension, i.icon, i.added_at, a.starred, a.stream_ok, "
+            f"CASE WHEN a.max_conn > 0 THEN a.active_conn < a.max_conn END "
             f"FROM {source} "
             f"JOIN account a ON a.source_id = i.source_id "
             f"LEFT JOIN category c ON c.source_id = i.source_id AND c.kind = i.kind "
             f"AND c.provider_id = i.category_id "
-            f"WHERE {' AND '.join(filters)} ORDER BY {order} LIMIT ?",
+            f"WHERE {' AND '.join(where)} ORDER BY {order} LIMIT ?",
             params,
         ).fetchall()
-        return [SearchHit(*row) for row in rows]
+        hits = [
+            SearchHit(
+                *row[:9], row[9].strip(), *row[10:14], bool(row[14]),
+                None if row[15] is None else bool(row[15]), None if row[16] is None else bool(row[16]),
+            )
+            for row in rows
+        ]
+        groups = _sort_groups(_group(hits), filters.sort)
+        return SearchResult(groups[:GROUP_LIMIT], truncated=len(rows) >= ROW_LIMIT or len(groups) > GROUP_LIMIT)
 
     def stats(self) -> CatalogStats:
         connection = self._conn()
@@ -368,6 +483,96 @@ class CatalogStore:
         ).fetchone()
         sources, items = connection.execute("SELECT COUNT(*), COALESCE(SUM(item_count), 0) FROM source").fetchone()
         return CatalogStats(accounts=accounts, indexed_accounts=indexed, sources=sources, items=items)
+
+
+def _codes(codes: frozenset[str]) -> str:
+    """Country codes as stored: " DE MULTI " (spaces make instr() match whole codes)."""
+    return f" {' '.join(sorted(codes))} " if codes else ""
+
+
+def _add_filters(filters: SearchFilters, where: list[str], params: list[object]) -> None:
+    """Append the SQL conditions (and their parameters) for ``filters``."""
+    now = time.time()
+    if filters.kind:
+        where.append("i.kind = ?")
+        params.append(filters.kind)
+    if filters.account_key:
+        where.append("a.key = ?")
+        params.append(filters.account_key)
+    if filters.starred_only:
+        where.append("a.starred = 1")
+    if filters.languages:
+        # country_filter.item_visible: a wanted category tag wins; else the
+        # item's own tags decide; else the category's; untagged only when not strict.
+        wanted = sorted(filters.languages)
+        cat_hit = "(" + " OR ".join("instr(i.cat_langs, ?)" for _ in wanted) + ")"
+        own_hit = "(" + " OR ".join("instr(i.item_langs, ?)" for _ in wanted) + ")"
+        where.append(
+            f"({cat_hit} OR (i.item_langs != '' AND (instr(i.item_langs, ' MULTI ') OR {own_hit})) "
+            f"OR (i.item_langs = '' AND ((i.cat_langs != '' AND instr(i.cat_langs, ' MULTI ')) "
+            f"OR (i.cat_langs = '' AND ?))))",
+        )
+        params.extend(f" {code} " for code in wanted)
+        params.extend(f" {code} " for code in wanted)
+        params.append(0 if filters.language_strict else 1)
+    if filters.min_quality in QUALITY_RANK:
+        where.append("i.quality_rank >= ?")
+        params.append(QUALITY_RANK[filters.min_quality])
+    if filters.year_from:
+        where.append("i.year >= ?")
+        params.append(filters.year_from)
+    if filters.year_to:
+        where.append("i.year BETWEEN 1 AND ?")
+        params.append(filters.year_to)
+    if filters.added_within_days:
+        where.append("i.added_at >= ?")
+        params.append(int(now - filters.added_within_days * 86400))
+    if filters.category_text.strip():
+        where.append("c.name LIKE ?")
+        params.append(f"%{filters.category_text.strip()}%")
+    if filters.stream_tested_only:
+        where.append("a.stream_ok = 1")
+    if filters.valid_for_days:
+        where.append("(a.expires_at IS NULL OR a.expires_at >= ?)")
+        params.append(now + filters.valid_for_days * 86400)
+    if filters.free_slots_only:
+        where.append("a.max_conn > 0 AND a.active_conn < a.max_conn")
+
+
+def _group(hits: list[SearchHit]) -> list[SearchGroup]:
+    """Hits (best first) into titles; an undated copy joins the one dated group of its title."""
+    groups: dict[tuple[str, str, int], SearchGroup] = {}
+    for position, hit in enumerate(hits):
+        key = (hit.kind, hit.title_norm or hit.name.casefold(), hit.year)
+        group = groups.get(key)
+        if group is None:
+            group = groups[key] = SearchGroup(kind=hit.kind, title=hit.title, year=hit.year, relevance=position)
+        group.hits.append(hit)
+    dated: dict[tuple[str, str], list[SearchGroup]] = {}
+    for (kind, norm, year), group in groups.items():
+        if year:
+            dated.setdefault((kind, norm), []).append(group)
+    for (kind, norm, year), group in list(groups.items()):
+        targets = dated.get((kind, norm), [])
+        if not year and len(targets) == 1:
+            target = targets[0]
+            target.hits.extend(group.hits)
+            target.relevance = min(target.relevance, group.relevance)
+            del groups[(kind, norm, year)]
+    return list(groups.values())
+
+
+def _sort_groups(groups: list[SearchGroup], sort: str) -> list[SearchGroup]:
+    by_relevance = sorted(groups, key=lambda group: group.relevance)
+    if sort == "year":
+        return sorted(by_relevance, key=lambda group: (group.year == 0, -group.year))
+    if sort == "added":
+        return sorted(by_relevance, key=lambda group: -group.added_at)
+    if sort == "accounts":
+        return sorted(by_relevance, key=lambda group: -group.account_count)
+    if sort == "title":
+        return sorted(by_relevance, key=lambda group: group.title.casefold())
+    return by_relevance
 
 
 def _words(text: str) -> list[str]:

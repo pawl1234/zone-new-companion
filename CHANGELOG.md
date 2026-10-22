@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Catalogs download in the background into `~/.zone-new-companion/catalog.db` and refresh daily; accounts on the same server with the same packages share one download
   - Accounts that are down (red) drop out of the results right away; removing an account deletes its data
   - Double-click plays a channel or movie on the account that has it, or opens a series' seasons
+  - The same title on several accounts is one row ("in 7 accounts") with its year, quality and languages; double-click plays on the best account (starred, streaming, free connection, best quality), expanding the row lists every copy
+  - Filters for quality, release year, recently added, category, streaming accounts, free connections and expiry; sorting by match, year, date added, number of accounts or title; the Language setting applies to the search as well
 
 ### Changed
 - **Stream Verification without external tools**: Verify now plays a few seconds of each stream headless through the bundled libmpv and reports *OK (Video+Audio)*, *OK (Video)*, *OK (Audio)* or why it is *OFF* (Unreachable, Timeout, Stalled, No Video/Audio)

@@ -141,8 +141,8 @@ def run() -> None:
 
     panel = window.search_panel
     panel.search_requested.connect(
-        lambda text, scope, kind: controller.search_catalog(
-            text, scope, kind, on_results=panel.show_hits, on_error=window.notify,
+        lambda text, scope, filters: controller.search_catalog(
+            text, scope, filters, on_results=panel.show_result, on_error=window.notify,
         ),
     )
     panel.hit_play_requested.connect(
@@ -164,8 +164,11 @@ def run() -> None:
     window.theme_mode_changed.connect(lambda mode: (theme.apply(qt_app, mode), controller.set_theme(mode)))
     window.set_language(controller.config.ui.language)
     window.language_changed.connect(controller.set_language)
+    # The language filter applies to the search tab as well.
+    window.language_changed.connect(lambda _language: window.search_panel.refresh())
     window.set_language_strict(controller.config.ui.language_strict)
     window.language_strict_changed.connect(controller.set_language_strict)
+    window.language_strict_changed.connect(lambda _strict: window.search_panel.refresh())
     if controller.debug_enabled:
         window.enable_debug_menu(str(DEBUG_DIR))
         window.debug_dump_requested.connect(lambda: controller.dump_full_catalog(window.notify, on_error))

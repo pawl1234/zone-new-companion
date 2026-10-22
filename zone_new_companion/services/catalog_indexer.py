@@ -8,6 +8,8 @@ from urllib.parse import urlparse
 
 from zone_new_companion.models import Credentials, MediaItem, PlaylistCategory
 from zone_new_companion.services.catalog_store import CatalogItem, CatalogStore
+from zone_new_companion.services.country_filter import detect_countries, detect_item_countries
+from zone_new_companion.services.title_parser import parse_title
 from zone_new_companion.services.xtream_service import XtreamService
 
 LOGGER = logging.getLogger(__name__)
@@ -51,7 +53,11 @@ def index_account(
 
     items: list[CatalogItem] = []
     for tab, kind in _KINDS.items():
-        items.extend(_catalog_item(media) for media in _fetch_kind(service, credentials, kind, categories[tab]))
+        names = {category.id: category.name for category in categories[tab]}
+        # Category tags are the same for all its streams: detect them once.
+        langs = {category_id: frozenset(detect_countries(name)) for category_id, name in names.items()}
+        for media in _fetch_kind(service, credentials, kind, categories[tab]):
+            items.append(_catalog_item(media, names, langs))
     category_rows = [
         (_KINDS[tab], category.id, category.name) for tab, rows in categories.items() for category in rows
     ]
@@ -81,18 +87,39 @@ def _fetch_kind(
     return items
 
 
-def _catalog_item(media: MediaItem) -> CatalogItem:
+def _catalog_item(
+    media: MediaItem,
+    category_names: dict[str, str],
+    category_langs: dict[str, frozenset[str]],
+) -> CatalogItem:
     row = media.metadata
     try:
         added_at = int(row.get("added") or row.get("last_modified") or 0)
     except (TypeError, ValueError):
         added_at = 0
+    category_id = str(row.get("category_id") or "")
+    parsed = parse_title(media.name, category_names.get(category_id, ""))
     return CatalogItem(
         kind=media.media_kind,
         provider_id=media.id,
-        category_id=str(row.get("category_id") or ""),
+        category_id=category_id,
         name=media.name,
+        title=parsed.title,
+        title_norm=parsed.title_norm,
+        year=parsed.year or _year_of(row),
+        quality=parsed.quality,
+        item_langs=frozenset(detect_item_countries(media.name, str(row.get("epg_channel_id") or ""))),
+        cat_langs=category_langs.get(category_id, frozenset()),
         extension=str(row.get("container_extension") or ""),
         icon=str(row.get("stream_icon") or row.get("cover") or ""),
         added_at=added_at,
     )
+
+
+def _year_of(row: dict) -> int:
+    """The release year some panels list separately ("year", "releaseDate")."""
+    for key in ("year", "releaseDate", "releasedate", "release_date"):
+        raw = str(row.get(key) or "")[:4]
+        if raw.isdigit() and 1900 <= int(raw) <= 2100:
+            return int(raw)
+    return 0

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+from dataclasses import replace
 from datetime import datetime
 from typing import Callable
 from urllib.parse import parse_qs, urlparse
@@ -28,7 +29,7 @@ from zone_new_companion.services.bulk_checker import (
     result_from_credentials,
 )
 from zone_new_companion.services.catalog_indexer import INDEXED_PORTALS, MAX_AGE_SECONDS, index_account, server_of
-from zone_new_companion.services.catalog_store import CatalogAccount, CatalogStore, SearchHit
+from zone_new_companion.services.catalog_store import CatalogAccount, CatalogStore, SearchFilters, SearchHit, SearchResult
 from zone_new_companion.services.country_filter import codes_for_language, filter_items
 from zone_new_companion.services.filter_debug import FilterDebugDumper, debug_enabled
 from zone_new_companion.services.hls_probe import find_hls_url
@@ -964,6 +965,10 @@ class AppController:
                 label=f"{server_of(account.base_url)} · {account.username or account.mac_address or 'playlist'}",
                 alive=account.stream_ok is not False,
                 starred=account.starred,
+                stream_ok=account.stream_ok,
+                expires_at=_expiry_timestamp(account.expiry),
+                max_conn=_int_or_none(account.max_connections),
+                active_conn=_int_or_none(account.active_connections),
             )
             for account in self._config.working_accounts
         ]
@@ -1021,16 +1026,17 @@ class AppController:
         self,
         text: str,
         scope: str,
-        kind: str | None,
-        on_results: Callable[[list[SearchHit]], None],
+        filters: SearchFilters,
+        on_results: Callable[[SearchResult], None],
         on_error: Callable[[str], None],
     ) -> None:
         """Search every indexed account; ``scope`` is "all", "starred" or "active".
 
-        Results of an older search that finishes late are dropped.
+        The language setting above the tabs applies here as well. Results of
+        an older search that finishes late are dropped.
         """
         if self._catalog is None:
-            on_results([])
+            on_results(SearchResult([]))
             return
         account_key: str | None = None
         if scope == "active":
@@ -1043,12 +1049,18 @@ class AppController:
         generation = self._search_generation
         catalog = self._catalog
 
-        def task() -> list[SearchHit]:
-            return catalog.search(text, kind=kind, account_key=account_key, starred_only=scope == "starred")
+        state = self._state_store.state
+        filters = replace(
+            filters,
+            account_key=account_key,
+            starred_only=scope == "starred",
+            languages=frozenset(codes_for_language(state.language)),
+            language_strict=state.language_strict,
+        )
 
-        worker = TaskWorker(task)
+        worker = TaskWorker(lambda: catalog.search(text, filters))
         worker.signals.succeeded.connect(
-            lambda hits: on_results(hits) if generation == self._search_generation else None,
+            lambda result: on_results(result) if generation == self._search_generation else None,
         )
         worker.signals.failed.connect(lambda message: self._on_error(message, on_error))
         self._thread_pool.start(worker)
@@ -1183,3 +1195,16 @@ def catalog_key(account: BulkResult) -> str:
 
 def catalog_key_for(credentials: Credentials) -> str:
     return catalog_key(result_from_credentials(credentials))
+
+
+
+def _expiry_timestamp(expiry: str) -> float | None:
+    """The bulk checker's "YYYY-MM-DD HH:MM" as a timestamp; None for unlimited/unknown."""
+    try:
+        return datetime.strptime(expiry.strip(), "%Y-%m-%d %H:%M").timestamp()
+    except ValueError:
+        return None
+
+
+def _int_or_none(value: str) -> int | None:
+    return int(value) if str(value).strip().isdigit() else None
