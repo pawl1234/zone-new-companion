@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-10-22
+
+### Fixed
+- **Windows: no freeze after startup**: with many accounts the window stopped responding for several seconds right after starting and again whenever the search index moved on (about 9.5 s with 361 accounts); the *Search* column of Working Accounts now updates in one go
+- **Windows: full-screen player no longer flickers**: the picture went black and froze each time the control bar was shown or hidden, because the graphics driver switched the window into exclusive full screen; the video now stays in windowed full screen
+
 ### Changed
 - **Smaller Windows executable** (about 15 MB less): the build leaves out files the app never uses: Qt's software OpenGL (`opengl32sw.dll`), Qt PDF, Qt translations, unused image formats, the README screenshots and setuptools; Python code is built with docstrings removed
   - On machines without an OpenGL driver (some VMs and remote desktop sessions) the built-in player cannot start; streams play in VLC there

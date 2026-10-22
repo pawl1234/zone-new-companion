@@ -2,7 +2,7 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>zone-new-companion-kidpoleon</id>
-    <version>2.0.1</version>
+    <version>2.0.2</version>
     <packageSourceUrl>https://github.com/pawl1234/zone-new-companion</packageSourceUrl>
     <owners>kidpoleon</owners>
     <title>Zone New Companion</title>
