@@ -31,7 +31,8 @@ LOGGER = logging.getLogger(__name__)
 # 2: parsed titles, languages and account health for grouping and filters.
 # 3: stream URLs of M3U playlist entries.
 # 4: partial sources (categories only), category order, searchable accounts.
-SCHEMA_VERSION = 4
+# 5: channel numbers and EPG ids, so browsing an account can read its catalog.
+SCHEMA_VERSION = 5
 # Matching rows (stream x account) read per search, best first; they are
 # grouped into at most GROUP_LIMIT titles.
 ROW_LIMIT = 5000
@@ -46,7 +47,9 @@ CREATE TABLE source (
     -- 0 while only the categories are known (a partial source).
     indexed_at REAL NOT NULL DEFAULT 0,
     item_count INTEGER NOT NULL DEFAULT 0,
-    categories_at REAL NOT NULL DEFAULT 0
+    categories_at REAL NOT NULL DEFAULT 0,
+    -- Downloaded through the Xtream API: opening the account lists its categories from here.
+    browsable INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE account (
     key TEXT PRIMARY KEY,
@@ -91,9 +94,13 @@ CREATE TABLE item (
     icon TEXT NOT NULL,
     added_at INTEGER NOT NULL,
     -- M3U entries play from their own URL; '' builds it from provider_id.
-    url TEXT NOT NULL DEFAULT ''
+    url TEXT NOT NULL DEFAULT '',
+    -- The provider's channel number (NULL: none), and the EPG id.
+    num REAL,
+    epg_id TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX item_source ON item(source_id);
+-- Also lists a category's streams when browsing.
+CREATE INDEX item_source ON item(source_id, kind, category_id);
 """
 
 _FTS_SCHEMA = """
@@ -114,6 +121,17 @@ _MIGRATE_3 = """
 ALTER TABLE source ADD COLUMN categories_at REAL NOT NULL DEFAULT 0;
 ALTER TABLE account ADD COLUMN searchable INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE category ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+"""
+
+# Schema 4 -> 5 keeps the catalogs but dates them back a month, so they are
+# downloaded again (in the background) with what browsing needs.
+_MIGRATE_4 = """
+ALTER TABLE source ADD COLUMN browsable INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE item ADD COLUMN num REAL;
+ALTER TABLE item ADD COLUMN epg_id TEXT NOT NULL DEFAULT '';
+DROP INDEX item_source;
+CREATE INDEX item_source ON item(source_id, kind, category_id);
+UPDATE source SET indexed_at = indexed_at - 30 * 86400 WHERE indexed_at > 0;
 """
 
 
@@ -150,6 +168,22 @@ class CatalogItem:
     icon: str = ""
     added_at: int = 0
     url: str = ""
+    num: float | None = None
+    epg_id: str = ""
+
+
+@dataclass(slots=True)
+class CatalogEntry:
+    """One stream of a category as browsing lists it."""
+
+    provider_id: str
+    name: str
+    category_id: str
+    extension: str
+    icon: str
+    added_at: int
+    num: float | None
+    epg_id: str
 
 
 @dataclass(slots=True)
@@ -291,6 +325,9 @@ class CatalogStore:
         version = connection.execute("PRAGMA user_version").fetchone()[0]
         if version == 3:
             connection.executescript(_MIGRATE_3)
+            version = 4
+        if version == 4:
+            connection.executescript(_MIGRATE_4)
             connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             version = SCHEMA_VERSION
         if version not in (0, SCHEMA_VERSION):
@@ -432,11 +469,13 @@ class CatalogStore:
         server: str,
         categories: Iterable[tuple[str, str, str]],
         items: Iterable[CatalogItem],
+        browsable: bool = False,
     ) -> int:
         """Store a freshly downloaded catalog and link the account to it.
 
         One transaction: searches keep seeing the old catalog until it commits.
         ``categories`` are (kind, provider_id, name) in the provider's order.
+        ``browsable``: the items are the Xtream API's, so browsing can list them.
         """
         with self._write_lock:
             connection = self._conn()
@@ -457,21 +496,22 @@ class CatalogStore:
                 self._replace_categories(connection, source_id, categories)
                 cursor = connection.executemany(
                     "INSERT INTO item(source_id, kind, provider_id, category_id, name, title, title_norm, year, "
-                    "quality, quality_rank, item_langs, cat_langs, extension, icon, added_at, url) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "quality, quality_rank, item_langs, cat_langs, extension, icon, added_at, url, num, epg_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         (
                             source_id, i.kind, i.provider_id, i.category_id, i.name, i.title or i.name,
                             i.title_norm, i.year, i.quality, QUALITY_RANK.get(i.quality, 0),
                             _codes(i.item_langs), _codes(i.cat_langs), i.extension, i.icon, i.added_at, i.url,
+                            i.num, i.epg_id,
                         )
                         for i in items
                     ),
                 )
                 count = cursor.rowcount
                 connection.execute(
-                    "UPDATE source SET indexed_at = ?, item_count = ?, server = ? WHERE id = ?",
-                    (time.time(), count, server, source_id),
+                    "UPDATE source SET indexed_at = ?, item_count = ?, server = ?, browsable = ? WHERE id = ?",
+                    (time.time(), count, server, int(browsable), source_id),
                 )
                 connection.execute("UPDATE account SET source_id = ? WHERE key = ?", (source_id, account_key))
                 self._purge_orphans(connection)
@@ -541,6 +581,21 @@ class CatalogStore:
             "WHERE a.key = ? ORDER BY c.position",
             (account_key,),
         ).fetchall()
+
+    def category_entries(self, account_key: str, kind: str, category_id: str) -> list[CatalogEntry]:
+        """A category's streams from the account's downloaded catalog, in the provider's order.
+
+        Empty when the catalog is not browsable (not downloaded, from a
+        playlist, or the categories changed since) or the category is empty.
+        """
+        rows = self._conn().execute(
+            "SELECT i.provider_id, i.name, i.category_id, i.extension, i.icon, i.added_at, i.num, i.epg_id "
+            "FROM account a JOIN source s ON s.id = a.source_id JOIN item i ON i.source_id = s.id "
+            "WHERE a.key = ? AND s.browsable = 1 AND s.indexed_at > 0 AND i.kind = ? AND i.category_id = ? "
+            "ORDER BY i.num IS NULL, i.num, i.id",
+            (account_key, kind, category_id),
+        ).fetchall()
+        return [CatalogEntry(*row) for row in rows]
 
     def live_ids(self, fingerprint: str, limit: int) -> list[str]:
         """A few live stream ids of a downloaded catalog (none for a partial one)."""

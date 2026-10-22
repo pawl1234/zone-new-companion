@@ -489,8 +489,14 @@ class MainWindow(QMainWindow):
         suffix = f" ({len(selected)} accounts)" if len(selected) > 1 else ""
         menu = QMenu(self.accounts_table)
         # Built per click, so a plain icon: bind_icon would keep every menu alive.
+        # Adding works whatever the limit; for indexed accounts it downloads again.
+        indexed = all(
+            self._index_states.get(account_key(result), ("",))[0] in ("Indexed", "Indexing…", "Queued")
+            for result in selected
+        )
         menu.addAction(
-            theme.icon("refresh-cw"), f"Refresh search index{suffix}",
+            theme.icon("refresh-cw" if indexed else "list-plus"),
+            f"{'Refresh' if indexed else 'Add to'} search index{suffix}",
             lambda: self.index_refresh_requested.emit(selected),
         )
         menu.addSeparator()

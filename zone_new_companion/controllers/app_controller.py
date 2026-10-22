@@ -395,12 +395,49 @@ class AppController:
         )
 
     def _fetch_category(self, profile: Credentials, tab_name: str, category: PlaylistCategory) -> list[MediaItem]:
-        """Worker-thread fetch of one category; recorded when debugging."""
-        items = self._service_for(profile).fetch_items(profile, category)
+        """Worker-thread fetch of one category; recorded when debugging.
+
+        An indexed XTREAM account lists it from its catalog without asking the
+        server; anything the catalog lacks comes from the server.
+        """
+        items = self._indexed_category(profile, category) or self._service_for(profile).fetch_items(profile, category)
         if self._debug is not None:
             state = self._state_store.state
             self._debug.record_items(profile, tab_name, category, items, state.language, state.language_strict)
         return items
+
+    def _indexed_category(self, profile: Credentials, category: PlaylistCategory) -> list[MediaItem]:
+        """The category's streams from the search index, as the server lists them (worker thread)."""
+        if self._catalog is None or profile.portal_type != PortalType.XTREAM:
+            return []
+        try:
+            entries = self._catalog.category_entries(catalog_key_for(profile), category.media_kind, category.id)
+        except Exception:  # noqa: BLE001 - the server is asked instead
+            LOGGER.exception("Could not read the category from the search index")
+            return []
+        item_type = {"live": "channel", "movies": "vod"}.get(category.media_kind, "series")
+        return [
+            MediaItem(
+                id=entry.provider_id,
+                name=entry.name,
+                media_kind=category.media_kind,
+                item_type=item_type,
+                # What the server's rows give the list, the EPG and the language filter.
+                metadata={
+                    "category_id": entry.category_id,
+                    "num": entry.num,
+                    "epg_channel_id": entry.epg_id,
+                    "stream_icon": entry.icon,
+                    "container_extension": entry.extension,
+                    "added": entry.added_at,
+                },
+                stream_url=(
+                    stream_url_for(profile, item_type, entry.provider_id, entry.extension)
+                    if item_type != "series" else None
+                ),
+            )
+            for entry in entries
+        ]
 
     @property
     def debug_enabled(self) -> bool:
@@ -988,6 +1025,7 @@ class AppController:
             carry_stream_history(result, earlier)
             if earlier is not None:
                 result.starred = earlier.starred
+                result.always_indexed = earlier.always_indexed
             merged.append(result)
         self.save_working_accounts(merged + list(previous.values()))
         return self.working_accounts()
@@ -1025,6 +1063,7 @@ class AppController:
             if account_key(account) == key:
                 carry_stream_history(result, account)
                 result.starred = account.starred
+                result.always_indexed = account.always_indexed
             else:
                 kept.append(account)
         self.save_working_accounts([result, *kept])
@@ -1091,8 +1130,19 @@ class AppController:
         on_success: Callable[[str], None],
         on_error: Callable[[str], None],
     ) -> None:
-        """Load a working account (any type) as the active profile and browse it."""
-        self.connect(credentials_for(result), on_success=on_success, on_error=on_error)
+        """Load a working account (any type) as the active profile and browse it.
+
+        Once it opens it joins the search index, whatever the limit: the user
+        chose it, so its catalog is worth downloading.
+        """
+
+        def connected(message: str) -> None:
+            if self._keep_indexed([result]):
+                # Makes it searchable in the catalog too, then downloads it.
+                self.sync_catalog()
+            on_success(message)
+
+        self.connect(credentials_for(result), on_success=connected, on_error=on_error)
 
     # Cross-account catalog search ------------------------------------------------
 
@@ -1157,8 +1207,11 @@ class AppController:
             account for account in self._config.working_accounts
             if account.portal_type in INDEXED_PORTALS and account.stream_ok is not False
         ]
+        # Accounts the user opened or added are indexed on top of the limit.
+        chosen = [account for account in candidates if account.always_indexed]
+        candidates = [account for account in candidates if not account.always_indexed]
         if not self.index_limit or len(candidates) <= self.index_limit:
-            return candidates
+            return chosen + candidates
         if info is None:
             info = self._catalog.index_info() if self._catalog is not None else {}
 
@@ -1168,7 +1221,22 @@ class AppController:
 
         # Stable: the list order breaks ties.
         ranked = sorted(candidates, key=lambda account: (not account.starred, not has_slot(account)))
-        return ranked[: self.index_limit]
+        return chosen + ranked[: self.index_limit]
+
+    def _keep_indexed(self, selected: list[BulkResult]) -> bool:
+        """Index the selected accounts whatever the limit, also after a restart.
+
+        Returns whether any was new to it (the config is saved then).
+        """
+        keys = {account_key(account) for account in selected if account.portal_type in INDEXED_PORTALS}
+        changed = False
+        for account in self._config.working_accounts:
+            if account_key(account) in keys and not account.always_indexed:
+                account.always_indexed = True
+                changed = True
+        if changed:
+            self._config_store.save(self._config)
+        return changed
 
     def sync_catalog(self) -> None:
         """Mirror the working accounts into the catalog, then index what is missing.
@@ -1232,13 +1300,17 @@ class AppController:
         self._enqueue(accounts, self._catalog.needing_index(list(accounts), max_age), time.time() - max_age)
 
     def refresh_index(self, selected: list[BulkResult] | None = None) -> str:
-        """Download the selected accounts' catalogs again now, or every indexed one's (None).
+        """Download the selected accounts' catalogs now, or every indexed one's again (None).
 
-        Accounts sharing a catalog download it once: whatever a refresh stored
-        after the request counts as fresh. Returns a line for the user.
+        Selected accounts join the index whatever the limit. Accounts sharing
+        a catalog download it once: whatever a refresh stored after the
+        request counts as fresh. Returns a line for the user.
         """
         if self._catalog is None:
             return "Search is not available."
+        if selected is not None and self._keep_indexed(selected):
+            # Makes them searchable in the catalog; the download starts below.
+            self.sync_catalog()
         accounts = {catalog_key(item): item for item in self._indexable()}
         skipped: list[str] = []
         if selected is not None:
@@ -1248,16 +1320,14 @@ class AppController:
                 if account.portal_type not in INDEXED_PORTALS:
                     skipped.append(f"{account.portal_type.upper()} accounts are not searchable yet.")
                 elif key not in accounts:
-                    skipped.append(
-                        "This account is down; Recheck it first." if account.stream_ok is False
-                        else "This account is beyond the index limit (View → Search index).",
-                    )
+                    # Kept for when a Recheck finds it working again.
+                    skipped.append("This account is down; it is indexed once a Recheck finds it working.")
                 elif key not in keys:
                     keys.append(key)
             if not keys and skipped:
                 if len(selected) == 1:
                     return skipped[0]
-                return "None of the selected accounts can be indexed (down, not searchable or beyond the limit)."
+                return "None of the selected accounts can be indexed now (down or not searchable)."
         else:
             keys = list(accounts)
         if not keys:
@@ -1265,8 +1335,8 @@ class AppController:
         added = self._enqueue(accounts, keys, time.time())
         if not added:
             return "Already indexing."
-        note = f" ({len(skipped)} skipped: down, not searchable or beyond the limit)" if skipped else ""
-        return f"Refreshing the search index of {added} account{'s' if added != 1 else ''}…{note}"
+        note = f" ({len(skipped)} skipped: down or not searchable)" if skipped else ""
+        return f"Indexing {added} account{'s' if added != 1 else ''}…{note}"
 
     def _enqueue(self, accounts: dict[str, BulkResult], keys: list[str], fresh_after: float) -> int:
         """Queue ``keys`` not queued yet and start the indexer; how many were added.
@@ -1371,6 +1441,9 @@ class AppController:
             if account.stream_ok is not False and catalog_key(account) in info
         )
         limit = f"limit {self.index_limit}" if self.index_limit else "no limit"
+        chosen = sum(1 for account in self._indexable(info) if account.always_indexed)
+        if self.index_limit and chosen:
+            limit += f" + {chosen} chosen"
         text = f"{searchable} account{'s' if searchable != 1 else ''} searchable ({limit})"
         streams = sum(count for _indexed_at, count in {info[key] for key in indexable if key in info})
         if streams:
@@ -1398,6 +1471,8 @@ class AppController:
         if key in info:
             indexed_at, count = info[key]
             tip = f"{count:,} streams, updated {_ago(indexed_at)}"
+            if account.always_indexed:
+                tip += "\nKept whatever the limit: you opened or added it"
             if key in self._index_errors:
                 # The last refresh failed; the older catalog is still searched.
                 return "Indexed", f"{tip}\nLast refresh failed: {self._index_errors[key]}", "warning"
@@ -1408,8 +1483,9 @@ class AppController:
             limit = self.index_limit
             return (
                 "Not indexed",
-                f"Only {limit} working accounts are searchable: starred first, then the ones already indexed.\n"
-                "Star this account or raise the limit under View → Search index.",
+                f"Only {limit} working accounts are indexed automatically: "
+                "starred first, then the ones already indexed.\n"
+                "Open this account, right-click → Add to search index, or raise the limit under View → Search index.",
                 "text_muted",
             )
         return "Waiting", "Will be indexed shortly", "text_muted"

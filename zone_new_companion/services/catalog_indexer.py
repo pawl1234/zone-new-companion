@@ -184,7 +184,7 @@ def index_account(
             items.append(_catalog_item(media, names, langs))
     if cancelled():
         return f"{server}: cancelled"
-    count = store.replace_source(account_key, fingerprint, server, category_rows(categories), items)
+    count = store.replace_source(account_key, fingerprint, server, category_rows(categories), items, browsable=True)
     return f"{server}: {count:,} streams indexed"
 
 
@@ -239,7 +239,17 @@ def _catalog_item(
         extension=str(row.get("container_extension") or ""),
         icon=str(row.get("stream_icon") or row.get("cover") or ""),
         added_at=added_at,
+        num=_num_of(row),
+        epg_id=str(row.get("epg_channel_id") or ""),
     )
+
+
+def _num_of(row: dict) -> float | None:
+    """The panel's channel number, which orders a category's streams."""
+    try:
+        return float(row.get("num"))
+    except (TypeError, ValueError):
+        return None
 
 
 def _year_of(row: dict) -> int:

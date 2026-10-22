@@ -125,6 +125,7 @@ class ConfigStore:
                 timezone=str(row.get("timezone", "")),
                 real_url=str(row.get("real_url", "")),
                 starred=bool(row.get("starred", False)),
+                always_indexed=bool(row.get("always_indexed", False)),
                 stream_ok=row.get("stream_ok") if isinstance(row.get("stream_ok"), bool) else None,
                 stream_status=str(row.get("stream_status", "")),
                 stream_checked_at=str(row.get("stream_checked_at", "")),

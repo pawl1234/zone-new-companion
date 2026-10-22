@@ -118,6 +118,9 @@ class BulkResult:
     real_url: str = ""
     # Pinned by the user in the Working Accounts list; starred rows sort first.
     starred: bool = False
+    # Opened or added to the search index by the user: indexed on top of the
+    # limit, which only caps the accounts indexed automatically.
+    always_indexed: bool = False
     # Second stage: can a live channel actually be streamed? None = not tested.
     stream_ok: bool | None = None
     stream_status: str = ""

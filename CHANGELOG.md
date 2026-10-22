@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Catalogs also refresh while the app stays open (checked hourly, failed ones are retried); View → Search index sets how often (12 hours, 24 hours, 3 days), shows the index size, and offers *Refresh all now* and *Clear index…*
   - M3U accounts are searchable too: the playlist is downloaded once and read in one pass; `get.php` links are indexed through their Xtream API (movies and series apart, shared with the same account added as XTREAM) and fall back to the playlist when the panel refuses it
   - Right-click an account in Working Accounts → *Refresh search index* downloads its catalog again right away; a failed refresh keeps the older catalog and shows the error in the Search column's tooltip
+  - Accounts you open (double-click) or add with right-click → *Add to search index* are indexed whatever the limit, also after a restart; the limit only caps the accounts indexed automatically, so a bulk check of 100 accounts still downloads just a few catalogs
+  - Browsing an indexed XTREAM account lists categories from its catalog instead of asking the server, so they open at once; categories the catalog doesn't have yet (or a catalog from before the categories changed) still come from the server
+  - Catalog schema 5 stores channel numbers and EPG ids for that; existing catalogs are kept for search and downloaded again in the background once
 
 ### Changed
 - **Recheck is gentler on servers and more reliable**: at most 6 accounts are checked at once per server (24 overall), alternating between servers; panels answered bursts with *503 Service Temporarily Unavailable*, which turned working accounts red
