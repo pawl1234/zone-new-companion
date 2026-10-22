@@ -3,18 +3,18 @@
   <metadata>
     <id>zone-new-companion-kidpoleon</id>
     <version>2.0.0</version>
-    <packageSourceUrl>https://github.com/kidpoleon/zone-new-companion</packageSourceUrl>
+    <packageSourceUrl>https://github.com/pawl1234/zone-new-companion</packageSourceUrl>
     <owners>kidpoleon</owners>
     <title>Zone New Companion</title>
     <authors>kidpoleon</authors>
-    <projectUrl>https://github.com/kidpoleon/zone-new-companion</projectUrl>
-    <iconUrl>https://raw.githubusercontent.com/kidpoleon/zone-new-companion/main/media/logo.png</iconUrl>
+    <projectUrl>https://github.com/pawl1234/zone-new-companion</projectUrl>
+    <iconUrl>https://raw.githubusercontent.com/pawl1234/zone-new-companion/main/media/logo.png</iconUrl>
     <copyright>2024 kidpoleon</copyright>
-    <licenseUrl>https://github.com/kidpoleon/zone-new-companion/blob/main/LICENSE</licenseUrl>
+    <licenseUrl>https://github.com/pawl1234/zone-new-companion/blob/main/LICENSE</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
-    <projectSourceUrl>https://github.com/kidpoleon/zone-new-companion</projectSourceUrl>
-    <docsUrl>https://github.com/kidpoleon/zone-new-companion/blob/main/README.md</docsUrl>
-    <bugTrackerUrl>https://github.com/kidpoleon/zone-new-companion/issues</bugTrackerUrl>
+    <projectSourceUrl>https://github.com/pawl1234/zone-new-companion</projectSourceUrl>
+    <docsUrl>https://github.com/pawl1234/zone-new-companion/blob/main/README.md</docsUrl>
+    <bugTrackerUrl>https://github.com/pawl1234/zone-new-companion/issues</bugTrackerUrl>
     <tags>iptv xtream stalker m3u vlc streaming media player</tags>
     <summary>Unified desktop IPTV companion app</summary>
     <description><![CDATA[
@@ -52,11 +52,11 @@ choco install zone-new-companion
 
 ## Links
 
-- [GitHub Repository](https://github.com/kidpoleon/zone-new-companion)
-- [Issues](https://github.com/kidpoleon/zone-new-companion/issues)
-- [Releases](https://github.com/kidpoleon/zone-new-companion/releases)
+- [GitHub Repository](https://github.com/pawl1234/zone-new-companion)
+- [Issues](https://github.com/pawl1234/zone-new-companion/issues)
+- [Releases](https://github.com/pawl1234/zone-new-companion/releases)
     ]]></description>
-    <releaseNotes>https://github.com/kidpoleon/zone-new-companion/releases</releaseNotes>
+    <releaseNotes>https://github.com/pawl1234/zone-new-companion/releases</releaseNotes>
     <dependencies>
       <dependency id="vlc" version="3.0.0" />
     </dependencies>

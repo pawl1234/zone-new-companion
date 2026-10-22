@@ -4,16 +4,16 @@
 
 # Zone New Companion
 
-[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](https://github.com/kidpoleon/zone-new-companion/releases)
+[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](https://github.com/pawl1234/zone-new-companion/releases)
 [![Python](https://img.shields.io/badge/python-3.8+-3776ab.svg)](https://www.python.org/)
 [![PyQt6](https://img.shields.io/badge/PyQt6-6.7+-41cd52.svg)](https://www.riverbankcomputing.com/software/pyqt/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)]()
-[![Downloads](https://img.shields.io/github/downloads/kidpoleon/zone-new-companion/total)]()
+[![Downloads](https://img.shields.io/github/downloads/pawl1234/zone-new-companion/total)]()
 
 **Unified desktop IPTV companion app for Xtream Codes, Stalker Portal, and M3U playlists**
 
-[Download](https://github.com/kidpoleon/zone-new-companion/releases) • [Features](#-features) • [Installation](#-installation) • [Usage](#-usage)
+[Download](https://github.com/pawl1234/zone-new-companion/releases) • [Features](#-features) • [Installation](#-installation) • [Usage](#-usage)
 
 </div>
 
@@ -197,7 +197,7 @@ sudo port install python312 vlc git
 
 ### Pre-built Binaries
 
-Download the latest release for your platform from [GitHub Releases](https://github.com/kidpoleon/zone-new-companion/releases):
+Download the latest release for your platform from [GitHub Releases](https://github.com/pawl1234/zone-new-companion/releases):
 
 - **Windows**: `zone-new-companion-<version>.exe`, one file with the built-in player inside
 - **macOS** (Apple Silicon): `Zone-New-Companion-<version>.dmg`
@@ -210,7 +210,7 @@ Each release also lists `SHA256SUMS.txt` with the checksums of its files.
 **Windows (PowerShell):**
 ```powershell
 # Download Windows executable
-Invoke-WebRequest -Uri "https://github.com/kidpoleon/zone-new-companion/releases/download/v2.0.0/zone-new-companion-2.0.0.exe" -OutFile "zone-new-companion.exe"
+Invoke-WebRequest -Uri "https://github.com/pawl1234/zone-new-companion/releases/download/v2.0.0/zone-new-companion-2.0.0.exe" -OutFile "zone-new-companion.exe"
 # Run
 .\zone-new-companion.exe
 ```
@@ -218,7 +218,7 @@ Invoke-WebRequest -Uri "https://github.com/kidpoleon/zone-new-companion/releases
 **macOS:**
 ```bash
 # Download macOS DMG
-curl -L -o "Zone-New-Companion-2.0.0.dmg" "https://github.com/kidpoleon/zone-new-companion/releases/download/v2.0.0/Zone-New-Companion-2.0.0.dmg"
+curl -L -o "Zone-New-Companion-2.0.0.dmg" "https://github.com/pawl1234/zone-new-companion/releases/download/v2.0.0/Zone-New-Companion-2.0.0.dmg"
 # Open
 open "Zone-New-Companion-2.0.0.dmg"
 ```
@@ -235,7 +235,7 @@ shasum -a 256 Zone-New-Companion-2.0.0.dmg
 
 ```bash
 # Clone repository
-git clone https://github.com/kidpoleon/zone-new-companion.git
+git clone https://github.com/pawl1234/zone-new-companion.git
 cd zone-new-companion
 
 # Create virtual environment

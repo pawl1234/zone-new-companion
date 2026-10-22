@@ -15,7 +15,7 @@ If you discover a security vulnerability in zone-new-companion, please report it
 ### How to Report
 
 1. **Email**: Send a detailed report to kidpoleon@proton.me (or use GitHub Security Advisory below)
-2. **GitHub Security**: Use the [GitHub Security Advisory](https://github.com/kidpoleon/zone-new-companion/security/advisories) feature
+2. **GitHub Security**: Use the [GitHub Security Advisory](https://github.com/pawl1234/zone-new-companion/security/advisories) feature
 3. **Private Issue**: Create a private issue on GitHub
 
 ### What to Include

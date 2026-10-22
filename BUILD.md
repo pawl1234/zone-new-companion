@@ -259,7 +259,7 @@ The icon is automatically embedded when using the `--icon` flag with PyInstaller
    Summary:        Unified desktop IPTV companion app
    
    License:        MIT
-   URL:            https://github.com/kidpoleon/zone-new-companion
+   URL:            https://github.com/pawl1234/zone-new-companion
    
    Requires:       mpv-libs
    Recommends:     vlc
@@ -489,4 +489,4 @@ Before releasing, verify:
 
 For build issues, contact: **Kidpoleon** <kidpoleon@proton.me>
 
-Or open an issue on GitHub: https://github.com/kidpoleon/zone-new-companion/issues
+Or open an issue on GitHub: https://github.com/pawl1234/zone-new-companion/issues

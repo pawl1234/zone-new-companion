@@ -38,7 +38,7 @@ Thank you for your interest in contributing to zone-new-companion! This document
 
 1. **Clone Repository**
    ```bash
-   git clone https://github.com/kidpoleon/zone-new-companion.git
+   git clone https://github.com/pawl1234/zone-new-companion.git
    cd zone-new-companion
    ```
 

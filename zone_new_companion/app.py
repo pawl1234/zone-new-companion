@@ -540,6 +540,6 @@ def _show_info(window: MainWindow) -> None:
         "About zone-new-companion",
         "zone-new-companion\n"
         f"Version: {__version__}\n\n"
-        "GitHub: https://github.com/kidpoleon/zone-new-companion\n"
+        "GitHub: https://github.com/pawl1234/zone-new-companion\n"
         "Support: Open an issue on GitHub\n",
     )
