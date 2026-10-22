@@ -801,20 +801,21 @@ class AppController:
         self._config_store.save(self._config)
 
     def merge_working_accounts(self, results: list[BulkResult]) -> list[BulkResult]:
-        """Take a new bulk check's accounts without losing starred ones.
+        """Add a new bulk check's accounts to the saved ones.
 
-        Stars carry over to accounts found again; starred accounts the new
-        check did not include stay in the list.
+        Accounts found again are replaced by their fresh result and keep their
+        star; saved accounts the check did not include stay in the list (only
+        a recheck removes accounts that stopped working).
         """
-        starred = {account_key(account): account for account in self._config.working_accounts if account.starred}
         previous = {account_key(account): account for account in self._config.working_accounts}
         merged: list[BulkResult] = []
         for result in results:
-            carry_stream_history(result, previous.get(account_key(result)))
-            if starred.pop(account_key(result), None) is not None:
-                result.starred = True
+            earlier = previous.pop(account_key(result), None)
+            carry_stream_history(result, earlier)
+            if earlier is not None:
+                result.starred = earlier.starred
             merged.append(result)
-        self.save_working_accounts(list(starred.values()) + merged)
+        self.save_working_accounts(merged + list(previous.values()))
         return self.working_accounts()
 
     def toggle_working_account_star(self, result: BulkResult) -> list[BulkResult]:

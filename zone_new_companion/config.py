@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
+import os
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from zone_new_companion.models import Credentials, PortalType
 from zone_new_companion.services.bulk_checker import BulkResult
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -43,13 +49,24 @@ class ConfigStore:
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
     def load(self) -> AppConfig:
-        """Load config from disk."""
+        """Load config from disk; defaults if it is missing or unreadable."""
         if not self._path.exists():
             return AppConfig()
+        try:
+            with self._path.open("r", encoding="utf-8") as file_handle:
+                return self._parse(json.load(file_handle))
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            # Keep the broken file so the next save does not destroy it.
+            backup = self._path.with_name(f"{self._path.name}.corrupt")
+            LOGGER.error("Unreadable config %s (%s); starting with defaults, kept as %s", self._path, exc, backup)
+            try:
+                os.replace(self._path, backup)
+            except OSError:
+                LOGGER.exception("Could not move the unreadable config aside")
+            return AppConfig()
 
-        with self._path.open("r", encoding="utf-8") as file_handle:
-            payload = json.load(file_handle)
-
+    @staticmethod
+    def _parse(payload: dict[str, Any]) -> AppConfig:
         ui_payload = payload.get("ui", {})
         history_payload = payload.get("successful_history", payload.get("profiles", []))
         history = [
@@ -120,5 +137,16 @@ class ConfigStore:
     def save(self, config: AppConfig) -> None:
         """Safely write config to disk."""
         payload: dict[str, Any] = asdict(config)
-        with self._path.open("w", encoding="utf-8") as file_handle:
-            json.dump(payload, file_handle, indent=2)
+        # Write a temp file next to the config and swap it in, so a crash
+        # mid-write leaves the previous config intact.
+        fd, temp_name = tempfile.mkstemp(dir=self._path.parent, prefix=f".{self._path.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as file_handle:
+                json.dump(payload, file_handle, indent=2)
+                file_handle.flush()
+                os.fsync(file_handle.fileno())
+            os.replace(temp_name, self._path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(temp_name)
+            raise
