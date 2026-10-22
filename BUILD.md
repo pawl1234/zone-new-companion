@@ -12,6 +12,28 @@ This guide explains how to build Zone New Companion for all supported platforms.
 
 ---
 
+## Quick Build (Scripts)
+
+Each script sets up `venv`, installs `requirements.txt`, fetches libmpv and runs
+PyInstaller. Run it on the platform you are building for; PyInstaller does not
+cross-compile.
+
+| Platform | Command | Output |
+|----------|---------|--------|
+| Windows | `powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1` | `dist\zone-new-companion.exe`: one file with libmpv inside |
+| macOS | `scripts/build_macos.sh` | `dist/Zone New Companion.app` and `dist/Zone-New-Companion-<version>.dmg` |
+
+- **Windows** downloads the latest `mpv-dev-x86_64` archive from
+  [shinchiro's mpv builds](https://github.com/shinchiro/mpv-winbuild-cmake/releases)
+  and caches `libmpv-2.dll` in `build\libmpv`. Unpacking it needs 7-Zip
+  (`winget install 7zip.7zip`) or Windows 11's `tar`. `-Libmpv <path>`
+  bundles a DLL you already have; `-NoLibmpv` builds without the built-in player.
+- **macOS** bundles Homebrew's libmpv (`brew install mpv`) with its dependencies.
+  The app runs on the build Mac's architecture and macOS version or newer.
+  `--no-libmpv` and `--no-dmg` skip those parts.
+
+---
+
 ## Prerequisites
 
 ### Common Requirements
@@ -62,7 +84,7 @@ it the app still runs and plays everything in external VLC.
 | Platform | Get libmpv | Bundle with PyInstaller |
 |----------|-----------|-------------------------|
 | Windows | `mpv-dev-x86_64-*.7z` from [shinchiro's mpv builds](https://github.com/shinchiro/mpv-winbuild-cmake/releases); copy `libmpv-2.dll` into the project root | `--add-binary "libmpv-2.dll;."` |
-| macOS | `brew install mpv` | `--add-binary "/opt/homebrew/lib/libmpv.2.dylib:."` (PyInstaller collects its dependent dylibs) |
+| macOS | `brew install mpv` | `cp -L /opt/homebrew/lib/libmpv.dylib build/libmpv.dylib`, then `--add-binary "build/libmpv.dylib:."` (PyInstaller collects its dependent dylibs; python-mpv only finds it under the name `libmpv.dylib`) |
 | Linux | `sudo apt install libmpv2` (Fedora: `mpv-libs`) | Not bundled; declared as a package dependency |
 
 License: the default libmpv builds are GPL. For an MIT release, ship an
@@ -288,7 +310,7 @@ The icon is automatically embedded when using the `--icon` flag with PyInstaller
      --add-data "media:media" \
      --add-data "zone_new_companion/ui/theme:zone_new_companion/ui/theme" \
      --hidden-import mpv \
-     --add-binary "/opt/homebrew/lib/libmpv.2.dylib:." \
+     --add-binary "build/libmpv.dylib:." \
      --exclude-module matplotlib \
      --exclude-module scipy \
      main.py

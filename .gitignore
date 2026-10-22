@@ -55,6 +55,10 @@ secrets/
 credentials/
 api_keys/
 
+# libmpv dropped into the project root for development (~120 MB)
+/libmpv*.dll
+/libmpv*.dylib
+
 # Build artifacts (keep dist/ for release binaries only)
 *.nupkg
 *.nuspec
