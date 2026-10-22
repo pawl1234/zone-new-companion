@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Right-click an account in Working Accounts → *Refresh search index* downloads its catalog again right away; a failed refresh keeps the older catalog and shows the error in the Search column's tooltip
 
 ### Changed
+- **Recheck is gentler on servers and more reliable**: at most 6 accounts are checked at once per server (24 overall), alternating between servers; panels answered bursts with *503 Service Temporarily Unavailable*, which turned working accounts red
+  - One timeout no longer turns every remaining account of that server red: a server is skipped only after 3 failed connections in a row (12 if it answered earlier in the run), or at once when its name doesn't resolve; the same applies to stream servers
+  - The progress count moves as each account finishes instead of waiting for the slowest one ahead of it
+  - Recheck fetches each account's category lists and stores them in the search index (a partial index the full download later builds on); accounts with the same categories share them, and the stream test reuses channels already known for that catalog
+- **Opening a working account is instant**: XTREAM accounts open with the categories a Recheck or an earlier visit stored; the server is asked in the background and the list updates when it changed
+- Accounts beyond the search index limit keep their categories; only their streams are left out of the index
 - **Stream Verification without external tools**: Verify now plays a few seconds of each stream headless through the bundled libmpv and reports *OK (Video+Audio)*, *OK (Video)*, *OK (Audio)* or why it is *OFF* (Unreachable, Timeout, Stalled, No Video/Audio)
   - Without libmpv it reads the stream's container instead (MPEG-TS, MP4, HLS, ADTS) and checks that video and audio packets arrive
   - At most 4 streams are probed at once; streams refused at connect are retried one by one, so accounts limited to one connection verify correctly

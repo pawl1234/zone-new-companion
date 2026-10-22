@@ -23,6 +23,7 @@ from zone_new_companion.services.base import PortalService
 from zone_new_companion.services.bulk_checker import (
     BulkChecker,
     BulkResult,
+    CatalogSighting,
     account_key,
     carry_stream_history,
     credentials_for,
@@ -33,6 +34,9 @@ from zone_new_companion.services.bulk_checker import (
 )
 from zone_new_companion.services.catalog_indexer import (
     INDEXED_PORTALS,
+    catalog_fingerprint,
+    categories_from_rows,
+    category_rows,
     index_account,
     index_m3u_account,
     server_of,
@@ -226,14 +230,18 @@ class AppController:
             self._navigation_stack = {"Live": [], "Movies": [], "Series": []}
             for tab_name in self._load_generation:
                 self._supersede_load(tab_name)
+            # Categories a Recheck or an earlier visit stored open the account
+            # at once; the server is asked in the background whether they changed.
+            cached = self._stored_categories(credentials)
             self._state_store.update(
                 active_profile=credentials,
-                categories={"Live": [], "Movies": [], "Series": []},
+                categories=cached or {"Live": [], "Movies": [], "Series": []},
+                credential_info=self._stored_connection_info(credentials) if cached else {},
                 current_items={"Live": [], "Movies": [], "Series": []},
                 verification_results={"Live": {}, "Movies": {}, "Series": {}},
                 persistent_verification_results={},
                 now_playing={"Live": {}, "Movies": {}, "Series": {}},
-                busy=True,
+                busy=cached is None,
                 status_text=f"Connecting to {credentials.base_url}",
             )
 
@@ -243,15 +251,26 @@ class AppController:
                 info = service.fetch_connection_info(credentials)
                 counts = ", ".join(f"{tab}: {len(rows)}" for tab, rows in categories.items())
                 logger_service.info(f"Retrieved categories ({counts})")
+                self._store_categories(credentials, categories)
                 return categories, info
 
             worker = TaskWorker(task)
-            worker.signals.succeeded.connect(lambda payload: self._on_connected(credentials, payload, on_success))
-            worker.signals.failed.connect(lambda message: self._on_error(message, on_error))
-            worker.signals.finished.connect(lambda: self._state_store.update(busy=False))
+            if cached is None:
+                worker.signals.succeeded.connect(lambda payload: self._on_connected(credentials, payload, on_success))
+                worker.signals.failed.connect(lambda message: self._on_error(message, on_error))
+                worker.signals.finished.connect(lambda: self._state_store.update(busy=False))
+            else:
+                token = self._begin_activity("Checking the categories for changes…")
+                worker.signals.succeeded.connect(lambda payload: self._on_refreshed(credentials, payload))
+                worker.signals.failed.connect(lambda message: self._on_refresh_failed(credentials, message))
+                worker.signals.finished.connect(lambda: self._end_activity(token))
             self._thread_pool.start(worker)
-            
+
             logger_service.info("Connection task started")
+            if cached is not None:
+                self._remember_success(credentials)
+                self._state_store.update(status_text="Saved categories loaded, checking for changes…")
+                on_success(f"Connected ({credentials.portal_type.value})")
         except Exception as exc:
             logger_service.error(f"Connection failed: {exc}")
             on_error(str(exc))
@@ -274,6 +293,71 @@ class AppController:
             status_text="Playlist categories loaded.",
         )
         on_success(f"Connected ({credentials.portal_type.value})")
+
+    def _stored_categories(self, credentials: Credentials) -> dict[str, list[PlaylistCategory]] | None:
+        """The account's categories from the search index, if a Recheck or visit stored them."""
+        if self._catalog is None or credentials.portal_type != PortalType.XTREAM:
+            return None
+        try:
+            rows = self._catalog.account_categories(catalog_key_for(credentials))
+        except Exception:  # noqa: BLE001 - the server is asked instead
+            LOGGER.exception("Could not read stored categories")
+            return None
+        return categories_from_rows(rows) if rows else None
+
+    def _stored_connection_info(self, credentials: Credentials) -> dict[str, str]:
+        """Account details from the last check, until the server's own arrive."""
+        key = catalog_key_for(credentials)
+        account = next((item for item in self._config.working_accounts if catalog_key(item) == key), None)
+        if account is None:
+            return {}
+        return {
+            "Status": account.status or "Unknown",
+            "Expiry": account.expiry or "Unknown",
+            "Active/Max Connections": f"{account.active_connections or '0'}/{account.max_connections or 'Unknown'}",
+            "Real URL": account.real_url or account.base_url,
+            "Timezone": account.timezone or "Unknown",
+        }
+
+    def _store_categories(self, credentials: Credentials, categories: dict[str, list[PlaylistCategory]]) -> None:
+        """Keep a working account's fetched categories in the index (worker thread)."""
+        if self._catalog is None or credentials.portal_type != PortalType.XTREAM:
+            return
+        record = (
+            catalog_key_for(credentials),
+            catalog_fingerprint(credentials.base_url, categories),
+            server_of(credentials.base_url),
+            category_rows(categories),
+        )
+        try:
+            self._catalog.record_categories([record])
+        except Exception:  # noqa: BLE001 - browsing goes on without it
+            LOGGER.exception("Could not store the categories")
+
+    def _on_refreshed(
+        self,
+        credentials: Credentials,
+        payload: tuple[dict[str, list[PlaylistCategory]], dict[str, str]],
+    ) -> None:
+        """The server answered after stored categories were shown: apply changes."""
+        if self._state_store.state.active_profile != credentials:
+            return  # Another account was opened meanwhile.
+        categories, connection_info = payload
+        changed = categories != self._state_store.state.categories
+        if changed:
+            self._state_store.update(categories=categories, status_text="Categories updated from the server.")
+        else:
+            self._state_store.update(status_text="Categories are up to date.")
+        self._state_store.update(credential_info=connection_info)
+        if changed:
+            # A new catalog: the indexer downloads it if the account is searchable.
+            self._schedule_indexing()
+
+    def _on_refresh_failed(self, credentials: Credentials, message: str) -> None:
+        if self._state_store.state.active_profile != credentials:
+            return
+        LOGGER.warning("Could not refresh the categories: %s", message)
+        self._state_store.update(status_text=f"Showing saved categories; the server did not answer ({message})")
 
     def load_items(
         self,
@@ -802,16 +886,22 @@ class AppController:
         self,
         check: Callable[[BulkChecker, Callable[[BulkResult, int, int], None]], list[BulkResult]],
     ) -> BulkCheckSignals:
-        """Run ``check(checker, progress)`` in the pool, reporting through signals."""
+        """Run ``check(checker, progress)`` in the pool, reporting through signals.
+
+        The category lists seen while checking go into the search index
+        before the results are reported.
+        """
         signals = BulkCheckSignals()
-        checker = BulkChecker()
+        checker = BulkChecker(known_live_ids=self._catalog.live_ids if self._catalog is not None else None)
         self._bulk_checker = checker
 
         def emit_progress(result: BulkResult, done: int, total: int) -> None:
             safe_emit(signals.progress, result, done, total)
 
         def task() -> list[BulkResult]:
-            return check(checker, emit_progress)
+            results = check(checker, emit_progress)
+            self._record_sightings(checker.catalogs)
+            return results
 
         class _BulkRunnable(QRunnable):
             def run(self_inner) -> None:  # noqa: N805
@@ -825,6 +915,24 @@ class AppController:
 
         self._thread_pool.start(_BulkRunnable())
         return signals
+
+    def _record_sightings(self, sightings: list[CatalogSighting]) -> None:
+        """Store checked accounts' categories as a partial index (worker thread)."""
+        if self._catalog is None or not sightings:
+            return
+        records = [
+            (
+                catalog_key(sighting.account),
+                sighting.fingerprint,
+                server_of(sighting.account.base_url),
+                category_rows(sighting.categories),
+            )
+            for sighting in sightings
+        ]
+        try:
+            self._catalog.record_categories(records)
+        except Exception:  # noqa: BLE001 - the check itself succeeded
+            LOGGER.exception("Could not store the checked accounts' categories")
 
     def cancel_bulk_check(self) -> None:
         """Stop an in-flight bulk check."""

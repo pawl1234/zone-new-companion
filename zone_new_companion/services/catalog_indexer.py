@@ -36,6 +36,21 @@ def catalog_fingerprint(base_url: str, categories: dict[str, list[PlaylistCatego
     return hashlib.sha1("\n".join(parts).encode("utf-8")).hexdigest()
 
 
+def category_rows(categories: dict[str, list[PlaylistCategory]]) -> list[tuple[str, str, str]]:
+    """fetch_categories' result as the store's (kind, provider_id, name), in the provider's order."""
+    return [(_KINDS[tab], category.id, category.name) for tab, rows in categories.items() for category in rows]
+
+
+def categories_from_rows(rows: list[tuple[str, str, str]]) -> dict[str, list[PlaylistCategory]]:
+    """The store's category rows back in fetch_categories' shape."""
+    tabs = {kind: tab for tab, kind in _KINDS.items()}
+    grouped: dict[str, list[PlaylistCategory]] = {tab: [] for tab in _KINDS}
+    for kind, provider_id, name in rows:
+        if kind in tabs:
+            grouped[tabs[kind]].append(PlaylistCategory(id=provider_id, name=name, media_kind=kind))
+    return grouped
+
+
 def server_of(base_url: str) -> str:
     return (urlparse(base_url).netloc or base_url).lower()
 
@@ -97,8 +112,8 @@ def index_m3u_account(
         if entry.group not in langs:
             langs[entry.group] = frozenset(detect_countries(entry.group))
         items.append(_m3u_item(entry, kind, langs[entry.group]))
-    category_rows = [(kind, group, name) for (kind, group), name in categories.items()]
-    count = store.replace_source(account_key, fingerprint, server, category_rows, items)
+    rows = [(kind, group, name) for (kind, group), name in categories.items()]
+    count = store.replace_source(account_key, fingerprint, server, rows, items)
     return f"{server}: {count:,} playlist entries indexed"
 
 
@@ -167,12 +182,9 @@ def index_account(
         langs = {category_id: frozenset(detect_countries(name)) for category_id, name in names.items()}
         for media in _fetch_kind(service, credentials, kind, categories[tab], cancelled):
             items.append(_catalog_item(media, names, langs))
-    category_rows = [
-        (_KINDS[tab], category.id, category.name) for tab, rows in categories.items() for category in rows
-    ]
     if cancelled():
         return f"{server}: cancelled"
-    count = store.replace_source(account_key, fingerprint, server, category_rows, items)
+    count = store.replace_source(account_key, fingerprint, server, category_rows(categories), items)
     return f"{server}: {count:,} streams indexed"
 
 

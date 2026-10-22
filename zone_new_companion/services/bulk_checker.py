@@ -4,9 +4,16 @@ Mirrors the web app's bulk checker: paste many Xtream `get.php` / `player_api.ph
 URLs (one per line, or "Host/User/Pass/M3U" account blocks), check them all in parallel against `get_user_info`, and
 report which accounts are reachable and valid. Saved accounts of every type
 (Xtream, M3U playlist, Stalker portal + MAC) are rechecked the same way via
-``check_accounts``. Once a host fails at the connection level, the remaining
-entries for that same host are skipped so dead servers don't slow the whole
-run down.
+``check_accounts``. Once a host keeps failing at the connection level, the
+remaining entries for that same host are skipped so dead servers don't slow
+the whole run down; a single timeout of a busy server doesn't count. Only a few accounts are checked at once per server: panels reject
+bursts with 503 answers that would read as dead accounts.
+
+Logging in also fetches the account's category lists. They identify its
+catalog (accounts on one server can have different packages), are handed back
+in ``BulkChecker.catalogs`` for the search index, and let the stream probe
+reuse channel ids already known for that catalog instead of downloading
+channel lists again.
 
 This module is intentionally Qt-free so it stays easy to test in isolation.
 """
@@ -16,17 +23,20 @@ from __future__ import annotations
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
+from itertools import zip_longest
 from typing import Callable
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 import requests
 
-from zone_new_companion.models import Credentials, PortalType
+from zone_new_companion.models import Credentials, PlaylistCategory, PortalType
+from zone_new_companion.services.catalog_indexer import catalog_fingerprint
 from zone_new_companion.services.network import normalize_url
 from zone_new_companion.services.stalker_service import StalkerService
+from zone_new_companion.services.xtream_service import XtreamService
 
 # Short timeouts keep the run snappy; slow/dead hosts shouldn't hold everyone up.
 FAST_CONNECT_TIMEOUT = 4.0
@@ -51,9 +61,24 @@ M3U_REJECT_CODES = {401, 403, 404, 410}
 # send the first byte.
 M3U_PLAYLIST_READ_TIMEOUT = 30.0
 
-# Upper bound on parallel requests. Enough to saturate the run without hammering
-# a single host so hard that it rate-limits us.
+# Category lists per fetch_categories tab; all three make up the catalog fingerprint.
+CATEGORY_ACTIONS = {
+    "Live": "get_live_categories",
+    "Movies": "get_vod_categories",
+    "Series": "get_series_categories",
+}
+
+# Upper bound on parallel requests across all servers.
 MAX_WORKERS = 24
+# Accounts checked at once on one server. Panels answer more with "503 Service
+# Temporarily Unavailable", which reads as a dead account; 24 at once got 7 of
+# 20 working accounts rejected, 6 at once none, in the same time.
+MAX_PER_HOST = 6
+# Failed connections in a row before a server counts as dead for the rest of
+# the run: few for one that never answered, a full round of its parallel checks
+# more for one that did (a busy server times out now and then).
+DEAD_AFTER_FAILURES = 3
+DEAD_AFTER_STREAK = 2 * MAX_PER_HOST
 
 
 @dataclass(slots=True)
@@ -373,13 +398,51 @@ def _stream_error(status_code: int) -> str:
 
 
 class _StreamFailure(Exception):
-    """A stream probe failed; ``host_dead`` marks a connection-level failure."""
+    """A stream probe failed."""
 
-    def __init__(self, reason: str, host: str = "", host_dead: bool = False) -> None:
+    def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
-        self.host = host
-        self.host_dead = host_dead
+
+
+def _name_not_found(error: str) -> bool:
+    """The server's name doesn't resolve: retrying the same server is pointless."""
+    text = error.lower()
+    return "name resolution" in text or "nameresolution" in text or "nodename nor servname" in text or (
+        "name or service" in text
+    )
+
+
+class _HostHealth:
+    """Which servers of a run count as dead, so their remaining checks are skipped.
+
+    Any answer resets a server's streak of failed connections. It is given up
+    after DEAD_AFTER_FAILURES failures in a row while it never answered in this
+    run, after DEAD_AFTER_STREAK once it had; a name that doesn't resolve is
+    dead at once.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._answered: set[str] = set()
+        self._streak: dict[str, int] = {}
+        self._dead: dict[str, str] = {}
+
+    def dead_reason(self, host: str) -> str:
+        with self._lock:
+            return self._dead.get(host, "")
+
+    def answered(self, host: str) -> None:
+        with self._lock:
+            self._answered.add(host)
+            self._streak[host] = 0
+
+    def failed(self, host: str, error: str) -> None:
+        with self._lock:
+            streak = self._streak[host] = self._streak.get(host, 0) + 1
+            limit = DEAD_AFTER_STREAK if host in self._answered else DEAD_AFTER_FAILURES
+            if streak >= limit or _name_not_found(error):
+                self._dead.setdefault(host, error)
 
 
 def _format_expiry(exp_date: object) -> str:
@@ -395,11 +458,24 @@ def _format_expiry(exp_date: object) -> str:
     return raw
 
 
+@dataclass(slots=True)
+class CatalogSighting:
+    """An account's category lists, as seen while checking it."""
+
+    account: BulkResult
+    fingerprint: str
+    categories: dict[str, list[PlaylistCategory]]
+
+
 class BulkChecker:
     """Run many Xtream availability checks in parallel, with cancellation."""
 
-    def __init__(self) -> None:
+    def __init__(self, known_live_ids: Callable[[str, int], list[str]] | None = None) -> None:
+        """``known_live_ids(fingerprint, count)`` gives live stream ids of an indexed catalog."""
         self._cancel = threading.Event()
+        self._known_live_ids = known_live_ids
+        # Filled by a run: the catalogs of the accounts that logged in.
+        self.catalogs: list[CatalogSighting] = []
 
     def cancel(self) -> None:
         """Request that an in-flight run stop as soon as possible."""
@@ -482,27 +558,38 @@ class BulkChecker:
     ) -> list[BulkResult]:
         """Check ``parsed`` in parallel next to already known ``results``."""
         done = len(results)
+        self.catalogs = []
 
         if not parsed:
             return [results[n] for n in sorted(results)]
 
-        # Submit same-host lines next to each other so that once a host is marked
-        # dead, its remaining lines can short-circuit instead of timing out.
-        parsed.sort(key=lambda item: urlparse(item.base_url).netloc)
+        # Alternate between servers so each gets its share of the workers; at
+        # most MAX_PER_HOST run on one server, and once a server is marked dead
+        # its waiting lines short-circuit instead of timing out.
+        by_host: dict[str, list[BulkInput]] = {}
+        for item in parsed:
+            by_host.setdefault(urlparse(item.base_url).netloc, []).append(item)
+        parsed = [item for row in zip_longest(*by_host.values()) for item in row if item is not None]
+        host_slots = {host: threading.Semaphore(MAX_PER_HOST) for host in by_host}
 
-        dead_hosts: dict[str, str] = {}
-        # Stream servers (often a redirect target) that refused connections.
-        dead_stream_hosts: dict[str, str] = {}
+        api_hosts = _HostHealth()
+        # Stream servers, often a redirect target.
+        stream_hosts = _HostHealth()
+        # Live stream ids that streamed, per catalog fingerprint.
+        catalog_ids: dict[str, list[str]] = {}
         lock = threading.Lock()
         session = self._build_session()
 
         def work(item: BulkInput) -> BulkResult:
+            host = urlparse(item.base_url).netloc
+            with host_slots[host]:
+                return check(item, host)
+
+        def check(item: BulkInput, host: str) -> BulkResult:
             if self._cancel.is_set():
                 return _result_for(item, error="Cancelled.")
 
-            host = urlparse(item.base_url).netloc
-            with lock:
-                dead_reason = dead_hosts.get(host)
+            dead_reason = api_hosts.dead_reason(host)
             if dead_reason:
                 skipped = _result_for(item, error=f"Skipped — {host} unreachable ({dead_reason})")
                 mark_server_unavailable(skipped)
@@ -516,14 +603,15 @@ class BulkChecker:
             else:
                 result, stream_urls = self._check_one(item, session), None
             if result.conn_level:
-                with lock:
-                    dead_hosts.setdefault(host, result.error)
-            elif result.ok and probe and not self._cancel.is_set():
+                api_hosts.failed(host, result.error)
+            else:
+                api_hosts.answered(host)
+            if result.ok and probe and not self._cancel.is_set():
                 if stream_urls is None:
                     account = _get_php_account(item) or item
-                    self._probe_streams(account, result, session, dead_stream_hosts, lock)
+                    self._probe_streams(account, result, session, stream_hosts, catalog_ids, lock)
                 else:
-                    self._probe_urls(result, stream_urls, session, dead_stream_hosts, lock)
+                    self._probe_urls(result, stream_urls, session, stream_hosts)
             if is_server_unavailable(result):
                 mark_server_unavailable(result)
             return result
@@ -531,7 +619,10 @@ class BulkChecker:
         try:
             workers = min(MAX_WORKERS, max(6, len(parsed)))
             with ThreadPoolExecutor(max_workers=workers) as pool:
-                for result in pool.map(work, parsed):
+                # Report each account as it finishes, not in input order: one
+                # slow server would otherwise hold the progress count back.
+                for future in as_completed([pool.submit(work, item) for item in parsed]):
+                    result = future.result()
                     results[result.line_number] = result
                     done += 1
                     if progress_cb is not None:
@@ -774,33 +865,78 @@ class BulkChecker:
         item: BulkInput,
         result: BulkResult,
         session: requests.Session,
-        dead_stream_hosts: dict[str, str],
+        stream_hosts: _HostHealth,
+        catalog_ids: dict[str, list[str]],
         lock: threading.Lock,
     ) -> None:
-        """Open a few live channels and record whether video actually flows."""
+        """Open a few live channels and record whether video actually flows.
+
+        The category lists are fetched first and recorded in ``catalogs``.
+        Channels known for the same catalog (from this run or the search
+        index) are tried before downloading the account's own channel lists.
+        """
         result.stream_checked_at = now_stamp()
         try:
-            stream_ids = self._sample_live_streams(item, session)
+            categories, complete = self._fetch_categories(item, session)
+        except requests.RequestException as exc:
+            result.stream_ok, result.stream_status = False, f"Channel list failed: {friendly_error(str(exc))}"
+            return
+        fingerprint = catalog_fingerprint(item.base_url, categories)
+        if complete:
+            with lock:
+                self.catalogs.append(CatalogSighting(result, fingerprint, categories))
+        if not categories["Live"]:
+            result.stream_ok, result.stream_status = False, "No live channels"
+            return
+
+        with lock:
+            known = catalog_ids.get(fingerprint, []) if complete else []
+        if not known and complete and self._known_live_ids is not None:
+            known = self._known_live_ids(fingerprint, PROBE_CHANNELS)
+        if known:
+            self._probe_ids(item, result, known, session, stream_hosts)
+            if result.stream_ok:
+                with lock:
+                    catalog_ids.setdefault(fingerprint, known)
+                return
+            if not result.stream_status.startswith("Channel not found") or self._cancel.is_set():
+                return
+            # Same categories but other channels: look at the account's own.
+
+        try:
+            stream_ids = self._sample_live_streams(item, session, categories["Live"])
         except requests.RequestException as exc:
             result.stream_ok, result.stream_status = False, f"Channel list failed: {friendly_error(str(exc))}"
             return
         if not stream_ids:
             result.stream_ok, result.stream_status = False, "No live channels"
             return
+        self._probe_ids(item, result, stream_ids, session, stream_hosts)
+        if result.stream_ok and complete:
+            with lock:
+                catalog_ids.setdefault(fingerprint, stream_ids)
 
+    def _probe_ids(
+        self,
+        item: BulkInput,
+        result: BulkResult,
+        stream_ids: list[str],
+        session: requests.Session,
+        stream_hosts: _HostHealth,
+    ) -> None:
+        """Probe the account's live streams with these ids."""
         formats = result.output_formats
         ext = "ts" if not formats or "ts" in formats else ("m3u8" if "m3u8" in formats else formats[0])
         base = item.base_url.rstrip("/")
         urls = [f"{base}/live/{item.username}/{item.password}/{stream_id}.{ext}" for stream_id in stream_ids]
-        self._probe_urls(result, urls, session, dead_stream_hosts, lock)
+        self._probe_urls(result, urls, session, stream_hosts)
 
     def _probe_urls(
         self,
         result: BulkResult,
         urls: list[str],
         session: requests.Session,
-        dead_stream_hosts: dict[str, str],
-        lock: threading.Lock,
+        stream_hosts: _HostHealth,
     ) -> None:
         """Record whether any of ``urls`` delivers video data."""
         result.stream_checked_at = now_stamp()
@@ -812,38 +948,63 @@ class BulkChecker:
             if self._cancel.is_set():
                 return
             try:
-                self._probe_one_stream(url, session, dead_stream_hosts, lock)
+                self._probe_one_stream(url, session, stream_hosts)
             except _StreamFailure as failure:
-                if failure.host_dead and failure.host:
-                    with lock:
-                        dead_stream_hosts.setdefault(failure.host, failure.reason)
                 first_failure = first_failure or failure.reason
                 continue
             result.stream_ok, result.stream_status = True, "Streaming"
             return
         result.stream_ok, result.stream_status = False, first_failure or "Not streaming"
 
-    def _sample_live_streams(self, item: BulkInput, session: requests.Session) -> list[str]:
+    def _fetch_categories(
+        self, item: BulkInput, session: requests.Session,
+    ) -> tuple[dict[str, list[PlaylistCategory]], bool]:
+        """The account's category lists, shaped like ``XtreamService.fetch_categories``.
+
+        Live categories must load (else ``RequestException``); an unreadable
+        list counts as empty, and ``complete`` is then False so the
+        fingerprint isn't trusted.
+        """
+        endpoint = normalize_url(item.base_url.rstrip("/"), "player_api.php")
+        auth = {"username": item.username, "password": item.password}
+        timeout = (FAST_CONNECT_TIMEOUT, FAST_READ_TIMEOUT)
+        categories: dict[str, list[PlaylistCategory]] = {}
+        complete = True
+        for tab, action in CATEGORY_ACTIONS.items():
+            try:
+                response = session.get(endpoint, params={**auth, "action": action}, timeout=timeout)
+                response.raise_for_status()
+                rows = XtreamService._coerce_row_list(response.json())
+            except requests.RequestException:
+                if tab == "Live":
+                    raise
+                complete, rows = False, []
+            except ValueError:
+                complete, rows = False, []
+            categories[tab] = [
+                PlaylistCategory(
+                    id=str(row.get("category_id", "")),
+                    name=str(row.get("category_name", "Unnamed")),
+                    media_kind=tab.lower(),
+                )
+                for row in rows
+            ]
+        return categories, complete
+
+    def _sample_live_streams(
+        self, item: BulkInput, session: requests.Session, categories: list[PlaylistCategory],
+    ) -> list[str]:
         """A few live stream ids, taken from the first non-empty categories."""
         endpoint = normalize_url(item.base_url.rstrip("/"), "player_api.php")
         auth = {"username": item.username, "password": item.password}
         timeout = (FAST_CONNECT_TIMEOUT, FAST_READ_TIMEOUT)
 
-        response = session.get(endpoint, params={**auth, "action": "get_live_categories"}, timeout=timeout)
-        response.raise_for_status()
-        try:
-            categories = response.json()
-        except ValueError:
-            categories = []
-        if not isinstance(categories, list):
-            categories = []
-
         stream_ids: list[str] = []
         # Category lists are small; the full get_live_streams can be megabytes.
         for category in categories[:3]:
-            if not isinstance(category, dict) or len(stream_ids) >= PROBE_CHANNELS:
+            if len(stream_ids) >= PROBE_CHANNELS:
                 break
-            params = {**auth, "action": "get_live_streams", "category_id": category.get("category_id")}
+            params = {**auth, "action": "get_live_streams", "category_id": category.id}
             response = session.get(endpoint, params=params, timeout=timeout)
             response.raise_for_status()
             try:
@@ -862,23 +1023,22 @@ class BulkChecker:
         self,
         url: str,
         session: requests.Session,
-        dead_stream_hosts: dict[str, str],
-        lock: threading.Lock,
+        stream_hosts: _HostHealth,
     ) -> requests.Response:
         """GET ``url``, following redirects by hand so dead hosts short-circuit."""
         timeout = (FAST_CONNECT_TIMEOUT, FAST_READ_TIMEOUT)
         for _ in range(PROBE_MAX_REDIRECTS + 1):
             host = urlparse(url).netloc
-            with lock:
-                dead_reason = dead_stream_hosts.get(host)
-            if dead_reason:
+            if stream_hosts.dead_reason(host):
                 raise _StreamFailure(f"Stream server {host} unreachable")
             try:
                 response = session.get(url, stream=True, timeout=timeout, allow_redirects=False)
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
-                raise _StreamFailure(f"Stream server {host} unreachable", host, host_dead=True) from exc
+                stream_hosts.failed(host, self._short_error(exc))
+                raise _StreamFailure(f"Stream server {host} unreachable") from exc
             except requests.RequestException as exc:
                 raise _StreamFailure(self._short_error(exc)) from exc
+            stream_hosts.answered(host)
             location = response.headers.get("Location")
             if response.is_redirect and location:
                 response.close()
@@ -910,11 +1070,10 @@ class BulkChecker:
         self,
         url: str,
         session: requests.Session,
-        dead_stream_hosts: dict[str, str],
-        lock: threading.Lock,
+        stream_hosts: _HostHealth,
     ) -> None:
         """Raise ``_StreamFailure`` unless ``url`` delivers media data."""
-        response = self._open_stream(url, session, dead_stream_hosts, lock)
+        response = self._open_stream(url, session, stream_hosts)
         final_url = response.url
         is_playlist = ".m3u8" in urlparse(url).path
         head = self._read_head(response, limit=64 * 1024 if is_playlist else PROBE_BYTES)
@@ -929,7 +1088,7 @@ class BulkChecker:
             target = next((line for line in lines if line and not line.startswith("#")), "")
             if not target:
                 raise _StreamFailure("Empty playlist")
-            response = self._open_stream(urljoin(final_url, target), session, dead_stream_hosts, lock)
+            response = self._open_stream(urljoin(final_url, target), session, stream_hosts)
             final_url = response.url
             is_playlist = ".m3u8" in target.split("?")[0]
             head = self._read_head(response, limit=64 * 1024 if is_playlist else PROBE_BYTES)

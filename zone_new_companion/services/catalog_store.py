@@ -4,6 +4,13 @@ The database is a cache, never the source of truth: config.json holds the
 accounts and their passwords, this file only what their servers list. A schema
 change simply rebuilds it. Accounts on the same server with the same packages
 share one *source*, so a catalog is downloaded and stored once.
+
+A source can be *partial*: only its categories are known (a Recheck or opening
+the account fetched them, ``indexed_at`` is 0). That is enough to open the
+account at once and to tell which accounts share a catalog; the indexer later
+fills in the streams. Accounts beyond the index limit keep their link but are
+not *searchable*, and a catalog no searchable account uses drops back to
+partial, so its streams don't take up space.
 """
 
 from __future__ import annotations
@@ -23,7 +30,8 @@ LOGGER = logging.getLogger(__name__)
 
 # 2: parsed titles, languages and account health for grouping and filters.
 # 3: stream URLs of M3U playlist entries.
-SCHEMA_VERSION = 3
+# 4: partial sources (categories only), category order, searchable accounts.
+SCHEMA_VERSION = 4
 # Matching rows (stream x account) read per search, best first; they are
 # grouped into at most GROUP_LIMIT titles.
 ROW_LIMIT = 5000
@@ -35,8 +43,10 @@ CREATE TABLE source (
     id INTEGER PRIMARY KEY,
     fingerprint TEXT UNIQUE NOT NULL,
     server TEXT NOT NULL,
+    -- 0 while only the categories are known (a partial source).
     indexed_at REAL NOT NULL DEFAULT 0,
-    item_count INTEGER NOT NULL DEFAULT 0
+    item_count INTEGER NOT NULL DEFAULT 0,
+    categories_at REAL NOT NULL DEFAULT 0
 );
 CREATE TABLE account (
     key TEXT PRIMARY KEY,
@@ -48,6 +58,8 @@ CREATE TABLE account (
     expires_at REAL,
     max_conn INTEGER,
     active_conn INTEGER,
+    -- Within the index limit: its catalog is downloaded and searched.
+    searchable INTEGER NOT NULL DEFAULT 1,
     source_id INTEGER REFERENCES source(id) ON DELETE SET NULL
 );
 CREATE INDEX account_source ON account(source_id);
@@ -56,6 +68,8 @@ CREATE TABLE category (
     kind TEXT NOT NULL,
     provider_id TEXT NOT NULL,
     name TEXT NOT NULL,
+    -- The provider's order.
+    position INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (source_id, kind, provider_id)
 ) WITHOUT ROWID;
 CREATE TABLE item (
@@ -93,6 +107,13 @@ END;
 CREATE TRIGGER item_ad AFTER DELETE ON item BEGIN
     INSERT INTO item_fts(item_fts, rowid, name) VALUES ('delete', old.id, old.name);
 END;
+"""
+
+# Schema 3 -> 4 keeps the downloaded catalogs.
+_MIGRATE_3 = """
+ALTER TABLE source ADD COLUMN categories_at REAL NOT NULL DEFAULT 0;
+ALTER TABLE account ADD COLUMN searchable INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE category ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
 """
 
 
@@ -268,6 +289,10 @@ class CatalogStore:
         """Create the tables, rebuilding the file on a schema change; whether FTS5 works."""
         connection = self._conn()
         version = connection.execute("PRAGMA user_version").fetchone()[0]
+        if version == 3:
+            connection.executescript(_MIGRATE_3)
+            connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            version = SCHEMA_VERSION
         if version not in (0, SCHEMA_VERSION):
             LOGGER.info("Catalog schema %s is outdated, rebuilding", version)
             connection.close()
@@ -292,11 +317,12 @@ class CatalogStore:
     def sync_accounts(self, accounts: Iterable[CatalogAccount], unindexed: Iterable[str] = ()) -> None:
         """Mirror the working-accounts list; removed accounts and their orphaned data go.
 
-        ``unindexed`` accounts (beyond the index limit) lose their catalog link,
-        so they are not searched and their data goes unless another account
-        shares it.
+        ``unindexed`` accounts (beyond the index limit) are not searched; a
+        catalog that no searchable account uses keeps only its categories.
+        Other accounts that are up become searchable; down ones stay as they
+        are, so they keep their catalog for when they come back.
         """
-        unlink = [(key,) for key in unindexed]
+        unsearchable = [(key,) for key in unindexed]
         rows = [
             (
                 a.key, a.portal_type, a.label, int(a.alive), int(a.starred),
@@ -321,8 +347,9 @@ class CatalogStore:
                     "max_conn = excluded.max_conn, active_conn = excluded.active_conn",
                     rows,
                 )
-                connection.executemany("UPDATE account SET source_id = NULL WHERE key = ?", unlink)
-                purged = self._purge_orphans(connection)
+                connection.execute("UPDATE account SET searchable = 1 WHERE alive = 1")
+                connection.executemany("UPDATE account SET searchable = 0 WHERE key = ?", unsearchable)
+                purged = self._purge_orphans(connection) + self._demote_unsearched(connection)
                 connection.execute("COMMIT")
             except BaseException:
                 connection.execute("ROLLBACK")
@@ -347,6 +374,19 @@ class CatalogStore:
             "DELETE FROM source WHERE id NOT IN (SELECT source_id FROM account WHERE source_id IS NOT NULL)",
         ).rowcount
 
+    @staticmethod
+    def _demote_unsearched(connection: sqlite3.Connection) -> int:
+        """Drop the streams of catalogs no searchable account uses; their categories stay."""
+        demoted = [
+            (row[0],) for row in connection.execute(
+                "SELECT id FROM source WHERE indexed_at > 0 AND id NOT IN "
+                "(SELECT source_id FROM account WHERE searchable = 1 AND source_id IS NOT NULL)",
+            )
+        ]
+        connection.executemany("DELETE FROM item WHERE source_id = ?", demoted)
+        connection.executemany("UPDATE source SET indexed_at = 0, item_count = 0 WHERE id = ?", demoted)
+        return len(demoted)
+
     def needing_index(self, keys: list[str], max_age_seconds: float) -> list[str]:
         """Of ``keys`` (in order), those with no catalog yet or an outdated one."""
         info = self.index_info()
@@ -354,9 +394,10 @@ class CatalogStore:
         return [key for key in keys if key not in info or info[key][0] < cutoff]
 
     def index_info(self) -> dict[str, tuple[float, int]]:
-        """(indexed_at, stream count) per account that has a catalog."""
+        """(indexed_at, stream count) per searchable account whose streams are downloaded."""
         rows = self._conn().execute(
-            "SELECT a.key, s.indexed_at, s.item_count FROM account a JOIN source s ON s.id = a.source_id",
+            "SELECT a.key, s.indexed_at, s.item_count FROM account a JOIN source s ON s.id = a.source_id "
+            "WHERE a.searchable = 1 AND s.indexed_at > 0",
         ).fetchall()
         return {key: (indexed_at, count) for key, indexed_at, count in rows}
 
@@ -365,7 +406,7 @@ class CatalogStore:
     def fresh_source(self, fingerprint: str, max_age_seconds: float) -> int | None:
         """The id of an indexed source with this fingerprint younger than max_age."""
         row = self._conn().execute(
-            "SELECT id FROM source WHERE fingerprint = ? AND indexed_at >= ?",
+            "SELECT id FROM source WHERE fingerprint = ? AND indexed_at > 0 AND indexed_at >= ?",
             (fingerprint, time.time() - max_age_seconds),
         ).fetchone()
         return row[0] if row else None
@@ -395,7 +436,7 @@ class CatalogStore:
         """Store a freshly downloaded catalog and link the account to it.
 
         One transaction: searches keep seeing the old catalog until it commits.
-        ``categories`` are (kind, provider_id, name).
+        ``categories`` are (kind, provider_id, name) in the provider's order.
         """
         with self._write_lock:
             connection = self._conn()
@@ -413,11 +454,7 @@ class CatalogStore:
                     "SELECT id FROM source WHERE fingerprint = ?", (fingerprint,),
                 ).fetchone()[0]
                 connection.execute("DELETE FROM item WHERE source_id = ?", (source_id,))
-                connection.execute("DELETE FROM category WHERE source_id = ?", (source_id,))
-                connection.executemany(
-                    "INSERT OR IGNORE INTO category(source_id, kind, provider_id, name) VALUES (?, ?, ?, ?)",
-                    ((source_id, kind, provider_id, name) for kind, provider_id, name in categories),
-                )
+                self._replace_categories(connection, source_id, categories)
                 cursor = connection.executemany(
                     "INSERT INTO item(source_id, kind, provider_id, category_id, name, title, title_norm, year, "
                     "quality, quality_rank, item_langs, cat_langs, extension, icon, added_at, url) "
@@ -446,6 +483,71 @@ class CatalogStore:
             self._compact(connection)
         return count
 
+    def record_categories(self, records: Iterable[tuple[str, str, str, list[tuple[str, str, str]]]]) -> None:
+        """Remember accounts' categories: a partial index, the basis for a full one.
+
+        ``records`` are (account_key, fingerprint, server, categories) with
+        categories as in ``replace_source``. Each account is linked to the
+        source of its fingerprint, which is created (partial) when new; its
+        streams, if downloaded, stay. Accounts not in the catalog are skipped.
+        """
+        with self._write_lock:
+            connection = self._conn()
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                for account_key, fingerprint, server, categories in records:
+                    if connection.execute("SELECT 1 FROM account WHERE key = ?", (account_key,)).fetchone() is None:
+                        continue
+                    connection.execute(
+                        "INSERT INTO source(fingerprint, server) VALUES (?, ?) ON CONFLICT(fingerprint) DO NOTHING",
+                        (fingerprint, server),
+                    )
+                    source_id = connection.execute(
+                        "SELECT id FROM source WHERE fingerprint = ?", (fingerprint,),
+                    ).fetchone()[0]
+                    self._replace_categories(connection, source_id, categories)
+                    connection.execute("UPDATE account SET source_id = ? WHERE key = ?", (source_id, account_key))
+                # A changed catalog leaves the old one behind.
+                purged = self._purge_orphans(connection)
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+            if purged:
+                self._compact(connection)
+
+    @staticmethod
+    def _replace_categories(
+        connection: sqlite3.Connection, source_id: int, categories: Iterable[tuple[str, str, str]],
+    ) -> None:
+        connection.execute("DELETE FROM category WHERE source_id = ?", (source_id,))
+        connection.executemany(
+            "INSERT OR IGNORE INTO category(source_id, kind, provider_id, name, position) VALUES (?, ?, ?, ?, ?)",
+            (
+                (source_id, kind, provider_id, name, position)
+                for position, (kind, provider_id, name) in enumerate(categories)
+            ),
+        )
+        connection.execute("UPDATE source SET categories_at = ? WHERE id = ?", (time.time(), source_id))
+
+    def account_categories(self, account_key: str) -> list[tuple[str, str, str]]:
+        """The account's known categories as (kind, provider_id, name), in the provider's order."""
+        return self._conn().execute(
+            "SELECT c.kind, c.provider_id, c.name FROM account a JOIN category c ON c.source_id = a.source_id "
+            "WHERE a.key = ? ORDER BY c.position",
+            (account_key,),
+        ).fetchall()
+
+    def live_ids(self, fingerprint: str, limit: int) -> list[str]:
+        """A few live stream ids of a downloaded catalog (none for a partial one)."""
+        rows = self._conn().execute(
+            "SELECT i.provider_id FROM source s JOIN item i ON i.source_id = s.id "
+            "WHERE s.fingerprint = ? AND s.indexed_at > 0 AND i.kind = 'live' AND i.url = '' "
+            "ORDER BY i.id LIMIT ?",
+            (fingerprint, limit),
+        ).fetchall()
+        return [row[0] for row in rows]
+
     # Search -------------------------------------------------------------------
 
     def search(self, text: str, filters: SearchFilters | None = None) -> SearchResult:
@@ -458,7 +560,7 @@ class CatalogStore:
         words = _words(text)
         if not words:
             return SearchResult([])
-        where = ["a.alive = 1"]
+        where = ["a.alive = 1", "a.searchable = 1"]
         params: list[object] = []
         if self.has_fts:
             source = "item_fts f JOIN item i ON i.id = f.rowid"
@@ -530,9 +632,13 @@ class CatalogStore:
     def stats(self) -> CatalogStats:
         connection = self._conn()
         accounts, indexed = connection.execute(
-            "SELECT COUNT(*), COUNT(source_id) FROM account WHERE alive = 1",
+            "SELECT COUNT(*), COUNT(s.id) FROM account a "
+            "LEFT JOIN source s ON s.id = a.source_id AND s.indexed_at > 0 AND a.searchable = 1 "
+            "WHERE a.alive = 1",
         ).fetchone()
-        sources, items = connection.execute("SELECT COUNT(*), COALESCE(SUM(item_count), 0) FROM source").fetchone()
+        sources, items = connection.execute(
+            "SELECT COUNT(*), COALESCE(SUM(item_count), 0) FROM source WHERE indexed_at > 0",
+        ).fetchone()
         return CatalogStats(accounts=accounts, indexed_accounts=indexed, sources=sources, items=items)
 
 
