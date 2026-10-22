@@ -63,8 +63,7 @@ If you discover a security vulnerability in zone-new-companion, please report it
 
 ### Third-Party Dependencies
 - VLC media player is used for stream playback
-- FFmpeg is used for stream analysis
-- Tesseract OCR is used for text recognition
+- libmpv is used for playback and stream verification
 - PyQt6 is used for the GUI framework
 
 ### Data Storage

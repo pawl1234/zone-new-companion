@@ -33,8 +33,6 @@ Thank you for your interest in contributing to zone-new-companion! This document
 - Python 3.8 or higher
 - Git
 - VLC media player
-- FFmpeg (for OCR functionality)
-- Tesseract OCR (for OCR functionality)
 
 ### Setup Steps
 

@@ -5,6 +5,16 @@ All notable changes to zone-new-companion will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Stream Verification without external tools**: Verify now plays a few seconds of each stream headless through the bundled libmpv and reports *OK (Video+Audio)*, *OK (Video)*, *OK (Audio)* or why it is *OFF* (Unreachable, Timeout, Stalled, No Video/Audio)
+  - Without libmpv it reads the stream's container instead (MPEG-TS, MP4, HLS, ADTS) and checks that video and audio packets arrive
+  - At most 4 streams are probed at once; streams refused at connect are retried one by one, so accounts limited to one connection verify correctly
+
+### Removed
+- **FFprobe, FFmpeg and Tesseract OCR**: No longer used; the opencv-python, pytesseract, Pillow and numpy requirements are gone, too
+
 ## [1.2.2] - 2026-05-09
 
 ### Fixed

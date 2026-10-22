@@ -21,7 +21,7 @@
 
 ## 📋 Overview
 
-Zone New Companion is a modern, cross-platform PyQt6 application that unifies IPTV workflows into a single intuitive interface. Connect to Xtream Codes, Stalker Portal, or M3U playlists with advanced stream verification and OCR-powered validation.
+Zone New Companion is a modern, cross-platform PyQt6 application that unifies IPTV workflows into a single intuitive interface. Connect to Xtream Codes, Stalker Portal, or M3U playlists with built-in playback and stream verification.
 
 ## ✨ Features
 
@@ -32,8 +32,7 @@ Zone New Companion is a modern, cross-platform PyQt6 application that unifies IP
 - **Cross-Platform** — Windows, Linux, macOS support
 
 ### Advanced Capabilities
-- **OCR Integration** — Frame analysis and text recognition
-- **Stream Verification** — Multi-stage validation with color-coded results
+- **Stream Verification** — Plays a few seconds of each stream headless and reports whether video and audio come through, color-coded
 - **SSL Optimization** — Multiple profiles for server compatibility
 - **DNS Fallback** — Automatic server switching
 - **Real-Time Updates** — Live progress indicators
@@ -55,10 +54,6 @@ Before running Zone New Companion, ensure you have the following dependencies in
 - **libmpv** — Built-in player (bundled with the packaged app; for running from source: `brew install mpv`, `apt install libmpv2`, or `libmpv-2.dll` next to `main.py` on Windows)
 - **VLC Media Player** — Optional; used when libmpv is missing, and via right-click → *Open in VLC*
 
-#### Optional for OCR Features
-- **Tesseract OCR** — Frame text recognition
-- **FFmpeg** — Video frame extraction
-
 ---
 
 ### 📦 Platform-Specific Setup Guides
@@ -73,27 +68,23 @@ Before running Zone New Companion, ensure you have the following dependencies in
 Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
 
 # Install all prerequisites
-choco install python vlc tesseract ffmpeg git -y
+choco install python vlc git -y
 ```
 
 **Option 2: Using winget**
 
 ```powershell
 # Install all prerequisites
-winget install Python.Python.3 VideoLAN.VLC TesseractOCR.Tesseract Gyan.FFmpeg Git.Git
+winget install Python.Python.3 VideoLAN.VLC Git.Git
 ```
 
 **Option 3: Manual Installation**
 1. **Python**: Download from [python.org](https://www.python.org/downloads/)
 2. **VLC**: Download from [videolan.org](https://www.videolan.org/vlc/)
-3. **Tesseract**: Download from [UB-Mannheim/tesseract](https://github.com/UB-Mannheim/tesseract/wiki)
-4. **FFmpeg**: Download from [ffmpeg.org](https://ffmpeg.org/download.html)
-5. **Git**: Download from [git-scm.com](https://git-scm.com/download/win)
+3. **Git**: Download from [git-scm.com](https://git-scm.com/download/win)
 
 **Add to PATH (if needed):**
 - VLC: `C:\Program Files\VideoLAN\VLC`
-- Tesseract: `C:\Program Files\Tesseract-OCR`
-- FFmpeg: Extract to `C:\ffmpeg\bin`
 
 ---
 
@@ -106,20 +97,18 @@ winget install Python.Python.3 VideoLAN.VLC TesseractOCR.Tesseract Gyan.FFmpeg G
 sudo apt update
 
 # Install all prerequisites
-sudo apt install -y python3 python3-pip python3-venv vlc tesseract-ocr ffmpeg git
+sudo apt install -y python3 python3-pip python3-venv vlc git
 
 # Verify installations
 python3 --version
 vlc --version
-tesseract --version
-ffmpeg -version
 ```
 
 **Fedora / RHEL / CentOS / Rocky Linux / AlmaLinux**
 
 ```bash
 # Install all prerequisites
-sudo dnf install -y python3 python3-pip vlc tesseract ffmpeg git
+sudo dnf install -y python3 python3-pip vlc git
 
 # For older RHEL/CentOS versions, enable EPEL first:
 sudo dnf install epel-release -y
@@ -129,35 +118,35 @@ sudo dnf install epel-release -y
 
 ```bash
 # Install all prerequisites
-sudo pacman -S python python-pip vlc tesseract ffmpeg git --noconfirm
+sudo pacman -S python python-pip vlc git --noconfirm
 ```
 
 **openSUSE / SUSE Linux Enterprise**
 
 ```bash
 # Install all prerequisites
-sudo zypper install -y python3 python3-pip vlc tesseract-ocr ffmpeg git
+sudo zypper install -y python3 python3-pip vlc git
 ```
 
 **Solus**
 
 ```bash
 # Install all prerequisites
-sudo eopkg install -y python3 vlc tesseract ffmpeg git
+sudo eopkg install -y python3 vlc git
 ```
 
 **Void Linux**
 
 ```bash
 # Install all prerequisites
-sudo xbps-install -Sy python3 vlc tesseract ffmpeg git
+sudo xbps-install -Sy python3 vlc git
 ```
 
 **Alpine Linux**
 
 ```bash
 # Install all prerequisites
-sudo apk add --no-cache python3 py3-pip vlc tesseract-ocr ffmpeg git
+sudo apk add --no-cache python3 py3-pip vlc git
 ```
 
 **Snap (Universal Linux)**
@@ -187,7 +176,7 @@ flatpak install flathub org.videolan.VLC
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
 # Install all prerequisites
-brew install python vlc tesseract ffmpeg git
+brew install python vlc git
 ```
 
 **Using MacPorts**
@@ -196,15 +185,13 @@ brew install python vlc tesseract ffmpeg git
 # Install MacPorts first from macports.org
 
 # Install all prerequisites
-sudo port install python312 vlc tesseract ffmpeg git
+sudo port install python312 vlc git
 ```
 
 **Manual Installation**
 1. **Python**: Download from [python.org](https://www.python.org/downloads/macos/)
 2. **VLC**: Download from [videolan.org](https://www.videolan.org/vlc/download-macos.html)
-3. **Tesseract**: Download installer from GitHub releases
-4. **FFmpeg**: Use Homebrew or download from ffmpeg.org
-5. **Git**: Download from [git-scm.com](https://git-scm.com/download/mac)
+3. **Git**: Download from [git-scm.com](https://git-scm.com/download/mac)
 
 ---
 
@@ -337,7 +324,7 @@ MIT License — see [LICENSE](LICENSE) file.
 - Original inspiration from [Cyogenus](https://github.com/Cyogenus) IPTV projects
 - [IPTV-MAC-STALKER-PLAYER-BY-MY-1](https://github.com/peterpt/IPTV-CHECK) - Stalker implementation reference
 - [stalkerhek](https://github.com/CrazeeGhost/stalkerhek/) - Go implementation reference
-- Built with PyQt6, VLC, FFmpeg, and Tesseract
+- Built with PyQt6 and libmpv
 
 ---
 

@@ -26,12 +26,11 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from zone_new_companion.services.libmpv import USER_AGENT
 from zone_new_companion.ui.theme import set_role, set_variant, theme
 
 LOGGER = logging.getLogger(__name__)
 
-# Same user agent the VLC launch sends; some portals only serve known players.
-USER_AGENT = "Lavf/57.83.100"
 # How far behind the live edge playback starts (and refills to after a stall).
 LIVE_BUFFER_S = 5
 SKIP_S = 30

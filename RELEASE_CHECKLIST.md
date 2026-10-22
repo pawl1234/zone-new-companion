@@ -70,17 +70,17 @@
 
 **Windows (Chocolatey):**
 ```powershell
-choco install python vlc tesseract ffmpeg git -y
+choco install python vlc git -y
 ```
 
 **Ubuntu/Debian:**
 ```bash
-sudo apt install python3 python3-pip vlc tesseract-ocr ffmpeg git
+sudo apt install python3 python3-pip vlc git
 ```
 
 **macOS (Homebrew):**
 ```bash
-brew install python vlc tesseract ffmpeg git
+brew install python vlc git
 ```
 
 See README.md for detailed prerequisites guides for all platforms.
@@ -152,7 +152,7 @@ Since you're on Windows, you need to build the Linux AppImage separately:
 wsl --install -d Ubuntu
 # Restart, then in WSL:
 sudo apt update
-sudo apt install python3 python3-pip python3-venv vlc tesseract-ocr ffmpeg git
+sudo apt install python3 python3-pip python3-venv vlc git
 # Clone repo and build following BUILD.md instructions
 ```
 
@@ -160,7 +160,7 @@ sudo apt install python3 python3-pip python3-venv vlc tesseract-ocr ffmpeg git
 
 ```powershell
 docker run --rm -v "${PWD}:/app" -w /app ubuntu:22.04 bash -c "
-  apt-get update && apt-get install -y python3 python3-pip python3-venv vlc tesseract-ocr ffmpeg git
+  apt-get update && apt-get install -y python3 python3-pip python3-venv vlc git
   pip3 install pyinstaller -r requirements.txt
   pyinstaller zone-new-companion.spec
   # Then create AppImage following BUILD.md

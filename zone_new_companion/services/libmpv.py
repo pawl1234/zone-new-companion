@@ -16,6 +16,9 @@ from types import ModuleType
 
 LOGGER = logging.getLogger(__name__)
 
+# Same user agent the VLC launch sends; some portals only serve known players.
+USER_AGENT = "Lavf/57.83.100"
+
 _module: ModuleType | None = None
 _error: str | None = None
 

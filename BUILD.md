@@ -102,14 +102,8 @@ source alongside it.
      --add-data "zone_new_companion\icon\icon.ico;zone_new_companion/icon" `
      --add-data "media;media" `
      --add-data "zone_new_companion\ui\theme;zone_new_companion/ui/theme" `
-     --hidden-import pytesseract `
-     --hidden-import cv2 `
-     --hidden-import numpy `
-     --hidden-import PIL `
      --hidden-import mpv `
      --add-binary "libmpv-2.dll;." `
-     --collect-all pytesseract `
-     --collect-all cv2 `
      --exclude-module matplotlib `
      --exclude-module scipy `
      main.py
@@ -149,12 +143,6 @@ The icon is automatically embedded when using the `--icon` flag with PyInstaller
      --add-data "zone_new_companion/icon/icon.ico:zone_new_companion/icon" \
      --add-data "media:media" \
      --add-data "zone_new_companion/ui/theme:zone_new_companion/ui/theme" \
-     --hidden-import pytesseract \
-     --hidden-import cv2 \
-     --hidden-import numpy \
-     --hidden-import PIL \
-     --collect-all pytesseract \
-     --collect-all cv2 \
      --exclude-module matplotlib \
      --exclude-module scipy \
      main.py
@@ -299,14 +287,8 @@ The icon is automatically embedded when using the `--icon` flag with PyInstaller
      --add-data "zone_new_companion/icon/icon.icns:zone_new_companion/icon" \
      --add-data "media:media" \
      --add-data "zone_new_companion/ui/theme:zone_new_companion/ui/theme" \
-     --hidden-import pytesseract \
-     --hidden-import cv2 \
-     --hidden-import numpy \
-     --hidden-import PIL \
      --hidden-import mpv \
      --add-binary "/opt/homebrew/lib/libmpv.2.dylib:." \
-     --collect-all pytesseract \
-     --collect-all cv2 \
      --exclude-module matplotlib \
      --exclude-module scipy \
      main.py

@@ -30,7 +30,6 @@ from zone_new_companion.services.country_filter import codes_for_language, filte
 from zone_new_companion.services.filter_debug import FilterDebugDumper, debug_enabled
 from zone_new_companion.services.hls_probe import find_hls_url
 from zone_new_companion.services.m3u_service import M3UService
-from zone_new_companion.services.ocr_service import OCRService
 from zone_new_companion.services.player_launcher import launch_stream
 from zone_new_companion.services.stalker_service import StalkerService
 from zone_new_companion.services.stream_verifier import StreamVerifier
@@ -55,7 +54,6 @@ class AppController:
             PortalType.STALKER: StalkerService(),
         }
         self._verifier = StreamVerifier()
-        self._ocr_service = OCRService()
         self._navigation_stack: dict[str, list[list[MediaItem]]] = {"Live": [], "Movies": [], "Series": []}
         self._bulk_checker: BulkChecker | None = None
         # Background loads shown in the status bar, keyed by a running token.
@@ -646,15 +644,7 @@ class AppController:
 
         def task() -> dict[str, str]:
             service = self._service_for(profile)
-            # Multiply threads by 2 for verify all requests
-            original_max = self._thread_pool.maxThreadCount()
-            self._thread_pool.setMaxThreadCount(original_max * 2)
-            try:
-                # Use optimized worker count for large batches
-                worker_count = min(48, max(16, len(items) // 5))
-                return self._verifier.verify_items(service, profile, items, workers=worker_count)
-            finally:
-                self._thread_pool.setMaxThreadCount(original_max)
+            return self._verifier.verify_items(service, profile, items)
 
         worker = TaskWorker(task)
         worker.signals.succeeded.connect(lambda result_map: self._on_verify_done(tab_name, result_map, on_success))
