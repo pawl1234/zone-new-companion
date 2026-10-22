@@ -15,6 +15,19 @@ class TaskSignals(QObject):
     finished = pyqtSignal()
 
 
+class BulkCheckSignals(QObject):
+    """Signals for a bulk-check run.
+
+    ``progress`` carries (BulkResult, done, total) as each line resolves;
+    ``succeeded`` carries the full list[BulkResult] when the run completes.
+    """
+
+    progress = pyqtSignal(object, int, int)
+    succeeded = pyqtSignal(object)
+    failed = pyqtSignal(str)
+    finished = pyqtSignal()
+
+
 class TaskWorker(QRunnable):
     """Run a callable in QThreadPool and emit status signals."""
 
@@ -27,8 +40,19 @@ class TaskWorker(QRunnable):
     def run(self) -> None:
         try:
             result = self._task()
-            self.signals.succeeded.emit(result)
         except Exception as exc:  # noqa: BLE001
-            self.signals.failed.emit(str(exc))
-        finally:
-            self.signals.finished.emit()
+            safe_emit(self.signals.failed, str(exc))
+        else:
+            safe_emit(self.signals.succeeded, result)
+        safe_emit(self.signals.finished)
+
+
+def safe_emit(signal: Any, *args: Any) -> None:
+    """Emit unless the app is closing and the signals object is already gone.
+
+    An exception escaping QRunnable.run makes PyQt abort the whole process.
+    """
+    try:
+        signal.emit(*args)
+    except RuntimeError:
+        pass

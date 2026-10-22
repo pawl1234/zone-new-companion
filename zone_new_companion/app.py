@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import logging
+import sqlite3
 import sys
 import os
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlparse
 
 # Set Windows AppUserModelID BEFORE any UI initialization (must be before QApplication)
 if sys.platform == 'win32':
     try:
         import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('kidpoleon.zone-new-companion.1.2.3')
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('kidpoleon.zone-new-companion.2.0.0')
     except Exception:
         pass
 
@@ -21,28 +24,35 @@ if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
 else:
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import QApplication, QInputDialog, QMessageBox
 from PyQt6.QtGui import QIcon
 from PyQt6.QtCore import Qt
-import qdarkstyle
 
 from zone_new_companion.config import ConfigStore
 from zone_new_companion.controllers.app_controller import AppController
+from zone_new_companion.services import libmpv
+from zone_new_companion.services.catalog_store import CatalogStore
+from zone_new_companion.services.bulk_checker import BulkResult, friendly_error, is_server_unavailable
 from zone_new_companion.logging_config import configure_logging
-from zone_new_companion.models import MediaItem, PlaylistCategory
+from zone_new_companion.services.filter_debug import DEBUG_DIR, debug_enabled
+from zone_new_companion.services.share_import import decode_share_string, extract_accounts, find_urls
+from zone_new_companion.models import Credentials, MediaItem, PlaylistCategory, PortalType
 from zone_new_companion.state import StateStore
 from zone_new_companion.ui.main_window import MainWindow
+from zone_new_companion.ui.theme import theme
+from zone_new_companion.ui.widgets.add_account_dialog import AddAccountDialog
+from zone_new_companion.ui.widgets.bulk_check_dialog import BulkCheckDialog
 from zone_new_companion import __version__
 
 
 def run() -> None:
     """Start the GUI application."""
     app_data = Path.home() / ".zone-new-companion"
-    configure_logging(app_data / "logs")
+    configure_logging(app_data / "logs", debug=debug_enabled())
 
     config_store = ConfigStore(app_data / "config.json")
     state_store = StateStore()
-    controller = AppController(state_store, config_store)
+    controller = AppController(state_store, config_store, _open_catalog(app_data / "catalog.db"))
 
     qt_app = QApplication(sys.argv)
     qt_app.setApplicationName("zone-new-companion")
@@ -54,8 +64,7 @@ def run() -> None:
         app_icon = QIcon(icon_path)
         qt_app.setWindowIcon(app_icon)
     
-    if controller.config.ui.dark_theme:
-        qt_app.setStyleSheet(qdarkstyle.load_stylesheet(qt_api="pyqt6"))
+    theme.apply(qt_app, controller.config.ui.theme)
 
     window = MainWindow()
     
@@ -71,12 +80,8 @@ def run() -> None:
         QMessageBox.critical(window, "Error", message)
 
     state_store.state_changed.connect(window.apply_state)
-    window.connect_requested.connect(
-        lambda credentials: controller.connect(
-            credentials,
-            on_success=lambda message: _on_connect_success(window, controller, message),
-            on_error=on_error,
-        ),
+    window.add_account_requested.connect(
+        lambda portal: _open_add_account(window, controller, portal, controller.config.last_input, on_error),
     )
     window.category_selected.connect(
         lambda tab_name, category: _load_category(controller, tab_name, category, on_error, window.notify),
@@ -85,10 +90,24 @@ def run() -> None:
         lambda tab_name, item: _activate_item(controller, tab_name, item, on_error, window.notify),
     )
     window.back_requested.connect(lambda tab_name: _go_back(controller, tab_name, window.notify, on_error))
-    window.history_selected.connect(lambda index: _pick_history(window, controller, index))
+    window.history_selected.connect(lambda index: _pick_history(window, controller, index, on_error))
     window.history_clear_requested.connect(lambda: _clear_history(window, controller))
     window.verify_item_requested.connect(
         lambda tab_name, item: controller.verify_single_item(tab_name, item, on_success=window.notify, on_error=on_error),
+    )
+    window.hls_play_requested.connect(
+        lambda item: controller.play(item, on_success=window.notify, on_error=on_error, prefer_hls=True),
+    )
+    window.vlc_play_requested.connect(
+        lambda item, hls: controller.play(item, on_success=window.notify, on_error=on_error, prefer_hls=hls, use_vlc=True),
+    )
+    player = _create_player(controller)
+    if player is not None:
+        qt_app.aboutToQuit.connect(player.shutdown)
+    window.hls_probe_requested.connect(
+        lambda item: controller.probe_hls(
+            item, on_result=lambda hls_url: window.show_hls_result(item.name, hls_url), on_error=on_error,
+        ),
     )
     window.verify_all_channels_requested.connect(
         lambda tab_name: controller.verify_all_channels(tab_name, on_success=window.notify, on_error=on_error),
@@ -100,17 +119,110 @@ def run() -> None:
         lambda: controller.cancel_verification(on_success=window.notify, on_error=on_error),
     )
     window.now_playing_requested.connect(lambda tab_name, item: controller.request_now_playing(tab_name, item))
-    window.reset_requested.connect(lambda: _reset(window, controller))
+    window.bulk_check_requested.connect(lambda: _open_bulk_check(window, controller, on_error))
+    window.share_import_requested.connect(lambda: _open_share_import(window, controller, on_error))
+    window.working_account_selected.connect(
+        lambda result: controller.connect_from_bulk(
+            result,
+            on_success=lambda message: _on_connect_success(window, controller, message),
+            on_error=on_error,
+        ),
+    )
 
-    if controller.config.last_input:
-        window.populate_form(controller.config.last_input)
+    window.working_accounts_clear_requested.connect(
+        lambda: _show_working_accounts(window, controller, []),
+    )
+    window.working_accounts_remove_requested.connect(
+        lambda results: window.show_working_accounts(controller.remove_working_accounts(results), announce=False),
+    )
+    window.working_account_star_toggled.connect(
+        lambda result: window.show_working_accounts(controller.toggle_working_account_star(result), announce=False),
+    )
+    window.working_accounts_recheck_requested.connect(lambda: _recheck_working_accounts(window, controller, on_error))
+    window.show_working_accounts(controller.working_accounts(), announce=False)
+
+    panel = window.search_panel
+    panel.search_requested.connect(
+        lambda text, scope, filters: controller.search_catalog(
+            text, scope, filters, on_results=panel.show_result, on_error=window.notify,
+        ),
+    )
+    panel.hit_play_requested.connect(
+        lambda hit, vlc: controller.play_search_hit(hit, on_success=window.notify, on_error=on_error, use_vlc=vlc),
+    )
+    panel.hit_open_requested.connect(
+        lambda hit: controller.open_search_hit(
+            hit,
+            on_opened=window.show_tab,
+            on_success=lambda message: _on_connect_success(window, controller, message),
+            on_error=on_error,
+        ),
+    )
+    # Accounts changing state (down, removed, newly indexed) re-run the search
+    # quietly: what the user opened or scrolled to stays.
+    controller.set_catalog_listener(
+        lambda text, states: (panel.set_status(text), window.set_index_states(states), panel.refresh(background=True)),
+    )
+    window.set_index_limit(controller.index_limit)
+    window.index_limit_changed.connect(controller.set_index_limit)
+    window.set_index_max_age(controller.index_max_age_hours)
+    window.index_max_age_changed.connect(controller.set_index_max_age_hours)
+    window.set_index_size_provider(controller.index_size)
+    window.index_refresh_requested.connect(lambda accounts: window.notify(controller.refresh_index(accounts)))
+    window.index_clear_requested.connect(lambda: controller.clear_index(window.notify, on_error))
+    controller.sync_catalog()
+
+    window.set_theme_mode(theme.mode)
+    window.theme_mode_changed.connect(lambda mode: (theme.apply(qt_app, mode), controller.set_theme(mode)))
+    window.set_language(controller.config.ui.language)
+    window.language_changed.connect(controller.set_language)
+    # The language filter applies to the search tab as well.
+    window.language_changed.connect(lambda _language: window.search_panel.refresh())
+    window.set_language_strict(controller.config.ui.language_strict)
+    window.language_strict_changed.connect(controller.set_language_strict)
+    window.language_strict_changed.connect(lambda _strict: window.search_panel.refresh())
+    if controller.debug_enabled:
+        window.enable_debug_menu(str(DEBUG_DIR))
+        window.debug_dump_requested.connect(lambda: controller.dump_full_catalog(window.notify, on_error))
 
     qt_app.aboutToQuit.connect(lambda: controller.save_ui_state(window.width(), window.height()))
+    # Stop indexing and let background tasks end before Qt tears the objects down.
+    qt_app.aboutToQuit.connect(controller.shutdown)
     
     # Show as normal window with controls (not fullscreen) - ensures minimize/maximize/close buttons
     window.show()
     
     sys.exit(qt_app.exec())
+
+
+def _open_catalog(path: Path) -> CatalogStore | None:
+    """The search catalog; a damaged file is a cache, so it is rebuilt. None disables search."""
+    for attempt in range(2):
+        try:
+            return CatalogStore(path)
+        except sqlite3.DatabaseError:
+            logging.getLogger(__name__).exception("Catalog %s unusable", path)
+            if attempt == 0:
+                for suffix in ("", "-wal", "-shm"):
+                    Path(f"{path}{suffix}").unlink(missing_ok=True)
+    return None
+
+
+def _create_player(controller: AppController):
+    """The built-in player window, or None (VLC plays) when libmpv is missing or fails."""
+    mpv_module = libmpv.load()
+    if mpv_module is None:
+        return None
+    # Imported here: the module needs python-mpv, which only loads with libmpv present.
+    from zone_new_companion.ui.widgets.player_window import PlayerWindow
+
+    try:
+        player = PlayerWindow(mpv_module)
+    except Exception:  # noqa: BLE001 - any libmpv startup failure means VLC
+        logging.getLogger(__name__).exception("Built-in player failed to start, using VLC")
+        return None
+    controller.set_builtin_player(lambda url, item: player.play(url, item.name, live=item.item_type == "channel"))
+    return player
 
 
 def _load_category(
@@ -150,18 +262,255 @@ def _go_back(
         on_error("No previous list for this tab.")
 
 
-def _pick_history(window: MainWindow, controller: AppController, index: int) -> None:
+def _pick_history(
+    window: MainWindow,
+    controller: AppController,
+    index: int,
+    on_error: Callable[[str], None],
+) -> None:
     history = controller.history_entries()
     if 0 <= index < len(history):
-        window.populate_form(history[index])
-        window.notify("Loaded credentials from history")
+        _open_add_account(window, controller, history[index].portal_type, history[index], on_error)
 
 
-def _reset(window: MainWindow, controller: AppController) -> None:
-    controller.reset_form()
-    window.login_panel.clear()
-    _refresh_history_menu(window, controller)
-    window.notify("Form reset")
+def _open_bulk_check(
+    window: MainWindow,
+    controller: AppController,
+    on_error: Callable[[str], None],
+    entries: list[str] | None = None,
+) -> None:
+    dialog = BulkCheckDialog(controller, parent=window, entries=entries)
+    # The dialog hands back every working account; the main window renders them
+    # as a pickable list and each click loads that account's streams.
+    dialog.accounts_chosen.connect(
+        lambda results: window.show_working_accounts(controller.merge_working_accounts(results)),
+    )
+    # Make sure a running check is cancelled if the dialog is dismissed.
+    dialog.finished.connect(lambda _code: controller.cancel_bulk_check())
+    dialog.exec()
+
+
+# Characters of decoded or downloaded text shown in the import message boxes.
+_SHARE_PREVIEW_CHARS = 600
+
+
+def _preview(text: str) -> str:
+    text = text.strip()
+    return text if len(text) <= _SHARE_PREVIEW_CHARS else text[:_SHARE_PREVIEW_CHARS] + "…"
+
+
+def _open_share_import(
+    window: MainWindow,
+    controller: AppController,
+    on_error: Callable[[str], None],
+) -> None:
+    """Decode a shared base64 string, then check the accounts in it or behind its link."""
+    title = "Import from base64 string"
+    raw, ok = QInputDialog.getMultiLineText(window, title, "Paste the base64 string:")
+    if not ok or not raw.strip():
+        return
+    try:
+        decoded = decode_share_string(raw)
+    except ValueError as exc:
+        QMessageBox.warning(window, title, str(exc))
+        return
+
+    accounts = extract_accounts(decoded)
+    urls = find_urls(decoded)
+    box = QMessageBox(window)
+    box.setWindowTitle(title)
+    box.setText("The string decodes to:")
+    box.setDetailedText(decoded)
+    if accounts:
+        question = f"It contains {len(accounts)} account{'s' if len(accounts) != 1 else ''}. Check and add them?"
+    elif urls:
+        question = f"Should I try to fetch accounts from URL:\n{urls[0]}"
+    else:
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setInformativeText(f"{_preview(decoded)}\n\nNo accounts or links found in it.")
+        box.exec()
+        return
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setInformativeText(f"{_preview(decoded)}\n\n{question}")
+    box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+    box.setDefaultButton(QMessageBox.StandardButton.Yes)
+    if box.exec() != QMessageBox.StandardButton.Yes:
+        return
+    if accounts:
+        _open_bulk_check(window, controller, on_error, accounts)
+        return
+
+    def on_fetched(payload: tuple[list[str], str]) -> None:
+        found, text = payload
+        if not found:
+            empty = QMessageBox(window)
+            empty.setIcon(QMessageBox.Icon.Warning)
+            empty.setWindowTitle(title)
+            empty.setText(f"No accounts found at {urls[0]}.")
+            empty.setInformativeText(_preview(text) or "The page is empty.")
+            empty.setDetailedText(text)
+            empty.exec()
+            return
+        window.notify(f"Found {len(found)} account{'s' if len(found) != 1 else ''}, checking them…")
+        _open_bulk_check(window, controller, on_error, found)
+
+    controller.fetch_shared_accounts(urls[0], on_success=on_fetched, on_error=on_error)
+
+def _open_add_account(
+    window: MainWindow,
+    controller: AppController,
+    portal: PortalType,
+    prefill: Credentials | None,
+    on_error: Callable[[str], None],
+) -> None:
+    """Ask for one account of the chosen type; it stays open while it is checked."""
+    dialog = AddAccountDialog(portal, prefill, parent=window)
+    dialog.submitted.connect(lambda credentials: _add_account(window, controller, dialog, credentials, on_error))
+    dialog.exec()
+
+
+def _add_account(
+    window: MainWindow,
+    controller: AppController,
+    dialog: AddAccountDialog,
+    credentials: Credentials,
+    on_error: Callable[[str], None],
+) -> None:
+    """Check one typed-in account, add it to the list and browse it."""
+    signals = controller.check_new_account(credentials)
+    if isinstance(signals, str):
+        QMessageBox.warning(dialog, "Check the input", signals)
+        return
+    dialog.set_checking(True)
+    running = [True]
+
+    def on_finished() -> None:
+        running[0] = False
+        dialog.set_checking(False)
+
+    signals.succeeded.connect(lambda results: _finish_add(window, controller, dialog, results, on_error))
+    signals.failed.connect(on_error)
+    signals.finished.connect(on_finished)
+    # Closing the dialog abandons a check that is still running.
+    dialog.rejected.connect(lambda: running[0] and controller.cancel_bulk_check())
+    # Keep the signals object alive until the check reports back.
+    dialog._signals = signals
+
+
+def _finish_add(
+    window: MainWindow,
+    controller: AppController,
+    dialog: AddAccountDialog,
+    results: list,
+    on_error: Callable[[str], None],
+) -> None:
+    if not dialog.isVisible():
+        return
+    result: BulkResult = results[0]
+    kind = result.portal_type.upper()
+    if not result.ok:
+        reason = friendly_error(result.error)
+        if is_server_unavailable(result):
+            text = f"The {kind} server is unreachable right now ({reason})."
+        else:
+            text = f"The {kind} account did not log in: {reason}."
+        answer = QMessageBox.question(
+            dialog,
+            "Account not working",
+            f"{text}\n\nAdd it to the list anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+    dialog.accept()
+    accounts = controller.add_working_account(result)
+    window.show_working_accounts(accounts, announce=False, select=result)
+    if not result.ok:
+        window.notify(f"{kind} account added (not working right now)")
+        return
+    streaming = "and streaming" if result.stream_ok else "but not streaming"
+    window.notify(f"{kind} account added — logs in {streaming}")
+    controller.connect_from_bulk(
+        result,
+        on_success=lambda message: _on_connect_success(window, controller, message),
+        on_error=on_error,
+    )
+
+
+def _show_working_accounts(window: MainWindow, controller: AppController, results: list) -> None:
+    controller.save_working_accounts(results)
+    window.show_working_accounts(results)
+
+
+def _recheck_working_accounts(
+    window: MainWindow,
+    controller: AppController,
+    on_error: Callable[[str], None],
+) -> None:
+    if not controller.working_accounts():
+        return
+    window.set_recheck_running(True)
+    signals = controller.recheck_working_accounts()
+    signals.progress.connect(
+        lambda _result, done, total: window.set_recheck_running(True, f"Rechecking {done}/{total}…"),
+    )
+    signals.succeeded.connect(lambda results: _finish_recheck(window, controller, results))
+    signals.failed.connect(on_error)
+    signals.finished.connect(lambda: window.set_recheck_running(False))
+    # Keep the signals object alive until the run reports back.
+    window._recheck_signals = signals
+
+
+def _finish_recheck(window: MainWindow, controller: AppController, results: list) -> None:
+    dead = controller.apply_recheck(results)
+    accounts = controller.working_accounts()
+    window.show_working_accounts(accounts, announce=False)
+    not_streaming = sum(1 for account in accounts if account.stream_ok is False)
+    if not dead:
+        if not_streaming:
+            window.notify(f"{not_streaming} account(s) can't stream right now - kept in the list (red)")
+        else:
+            window.notify("All working accounts log in and stream")
+        return
+    # Group by provider: dead accounts almost always fail together per server.
+    by_provider: dict[str, list] = {}
+    for account in dead:
+        provider = urlparse(account.base_url).hostname or account.base_url
+        by_provider.setdefault(provider, []).append(account)
+    summary = []
+    for provider, group in sorted(by_provider.items(), key=lambda item: -len(item[1])):
+        reasons = sorted({friendly_error(account.error) for account in group})
+        count = f"{len(group)} account{'s' if len(group) != 1 else ''}"
+        summary.append(f"•  {provider}  ({count}) — {', '.join(reasons)}")
+    details = [
+        f"{'★ ' if account.starred else ''}{account.portal_type.upper()} "
+        f"{account.username or account.mac_address or 'playlist'} @ {urlparse(account.base_url).hostname}: "
+        f"{account.error or 'not working'}"
+        for account in dead
+    ]
+    starred = sum(1 for account in dead if account.starred)
+    box = QMessageBox(window)
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setWindowTitle("Remove non-working accounts?")
+    box.setText(f"The server rejected {len(dead)} account{'s' if len(dead) != 1 else ''}.")
+    box.setInformativeText(
+        "\n".join(summary)
+        + (f"\n\n{starred} of them {'is' if starred == 1 else 'are'} starred." if starred else "")
+        + (
+            "\n\nAccounts whose server is only unreachable stay in the list (red)."
+            if not_streaming > len(dead)
+            else ""
+        )
+        + "\n\nRemove them from the list?",
+    )
+    box.setDetailedText("\n".join(details))
+    box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+    box.setDefaultButton(QMessageBox.StandardButton.No)
+    answer = box.exec()
+    if answer == QMessageBox.StandardButton.Yes:
+        window.show_working_accounts(controller.remove_working_accounts(dead), announce=False)
+        window.notify(f"Removed {len(dead)} non-working account(s)")
 
 
 def _on_connect_success(window: MainWindow, controller: AppController, message: str) -> None:
@@ -191,6 +540,6 @@ def _show_info(window: MainWindow) -> None:
         "About zone-new-companion",
         "zone-new-companion\n"
         f"Version: {__version__}\n\n"
-        "GitHub: https://github.com/kidpoleon/zone-new-companion\n"
+        "GitHub: https://github.com/pawl1234/zone-new-companion\n"
         "Support: Open an issue on GitHub\n",
     )

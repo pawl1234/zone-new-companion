@@ -5,6 +5,51 @@ All notable changes to zone-new-companion will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [2.0.0] - 2026-10-22
+
+### Added
+- **Import from base64 string**: *Add → Import from base64 string…* decodes a shared string, shows what's in it and offers to fetch the accounts from the link inside (or to check the accounts it contains directly); the found accounts open in the bulk check right away
+  - paste.sh pastes are decrypted with the key from the link (`#…`), pastebin.com links read the raw paste, other links are downloaded as text
+  - Account blocks with styled letters (`𝙐𝙨𝙚𝙧 : …`, `𝐌𝟑𝐔 : …`) are recognised; titles, notes and duplicates are left out
+- **Search across accounts**: New *Search* tab (Ctrl+F) finds movies, series and live channels in every working XTREAM and M3U account at once, filtered by account (all, starred, the one being browsed) and type
+  - Catalogs download in the background into `~/.zone-new-companion/catalog.db` and refresh daily; accounts on the same server with the same packages share one download
+  - Accounts that are down (red) drop out of the results right away; removing an account deletes its data
+  - Double-click plays a channel or movie on the account that has it, or opens a series' seasons
+  - The same title on several accounts is one row ("in 7 accounts") with its year, quality and languages; double-click plays on the best account (starred, streaming, free connection, best quality), expanding the row lists every copy
+  - Filters for quality, release year, recently added, category, streaming accounts, free connections and expiry; sorting by match, year, date added, number of accounts or title; the Language setting applies to the search as well
+  - Only the first 5 working accounts are indexed by default (starred first, then the ones that stream); View → Search index changes the limit, and a new *Search* column in Working Accounts shows each account's state (Indexed, Indexing…, Queued, Not indexed, Paused)
+  - Results that update in the background keep expanded rows, the selection and the scroll position
+  - Catalogs also refresh while the app stays open (checked hourly, failed ones are retried); View → Search index sets how often (12 hours, 24 hours, 3 days), shows the index size, and offers *Refresh all now* and *Clear index…*
+  - M3U accounts are searchable too: the playlist is downloaded once and read in one pass; `get.php` links are indexed through their Xtream API (movies and series apart, shared with the same account added as XTREAM) and fall back to the playlist when the panel refuses it
+  - Right-click an account in Working Accounts → *Refresh search index* downloads its catalog again right away; a failed refresh keeps the older catalog and shows the error in the Search column's tooltip
+  - Accounts you open (double-click) or add with right-click → *Add to search index* are indexed whatever the limit, also after a restart; the limit only caps the accounts indexed automatically, so a bulk check of 100 accounts still downloads just a few catalogs
+  - Browsing an indexed XTREAM account lists categories from its catalog instead of asking the server, so they open at once; categories the catalog doesn't have yet (or a catalog from before the categories changed) still come from the server
+  - Catalog schema 5 stores channel numbers and EPG ids for that; existing catalogs are kept for search and downloaded again in the background once
+
+### Changed
+- **Recheck is gentler on servers and more reliable**: at most 6 accounts are checked at once per server (24 overall), alternating between servers; panels answered bursts with *503 Service Temporarily Unavailable*, which turned working accounts red
+  - One timeout no longer turns every remaining account of that server red: a server is skipped only after 3 failed connections in a row (12 if it answered earlier in the run), or at once when its name doesn't resolve; the same applies to stream servers
+  - The progress count moves as each account finishes instead of waiting for the slowest one ahead of it
+  - Recheck fetches each account's category lists and stores them in the search index (a partial index the full download later builds on); accounts with the same categories share them, and the stream test reuses channels already known for that catalog
+- **Opening a working account is instant**: XTREAM accounts open with the categories a Recheck or an earlier visit stored; the server is asked in the background and the list updates when it changed
+  - A newly added account opens with the categories its check already fetched, instead of asking the server again
+- Accounts beyond the search index limit keep their categories; only their streams are left out of the index
+  - Indexed accounts keep their place: a new or re-sorted account waits for a free slot instead of pushing another account's catalog out (starring one still brings it in)
+  - Removing an account, or one dropping beyond the limit, stops its queued or running catalog download
+- **Stream Verification without external tools**: Verify now plays a few seconds of each stream headless through the bundled libmpv and reports *OK (Video+Audio)*, *OK (Video)*, *OK (Audio)* or why it is *OFF* (Unreachable, Timeout, Stalled, No Video/Audio)
+  - Without libmpv it reads the stream's container instead (MPEG-TS, MP4, HLS, ADTS) and checks that video and audio packets arrive
+  - At most 4 streams are probed at once; streams refused at connect are retried one by one, so accounts limited to one connection verify correctly
+- **Automatic releases**: Merging a version bump into `main` builds the Windows `.exe` and the macOS `.dmg` on GitHub Actions and publishes them as a GitHub release, with this changelog's section as the release notes
+  - `scripts/build_windows.ps1` and `scripts/build_macos.sh` build each platform locally, with libmpv bundled
+
+### Fixed
+- **Closing the app during background work**: Closing while catalogs were indexing (or a check was running) crashed Python on exit; indexing now stops and the app closes cleanly
+
+### Removed
+- **FFprobe, FFmpeg and Tesseract OCR**: No longer used; the opencv-python, pytesseract, Pillow and numpy requirements are gone, too
+
 ## [1.2.2] - 2026-05-09
 
 ### Fixed

@@ -4,12 +4,9 @@
 
 | Version | Supported          |
 |---------|--------------------|
-| 1.2.3   | :white_check_mark: |
-| 1.2.2   | :white_check_mark: |
-| 1.2.1   | :white_check_mark: |
-| 1.2.0   | :white_check_mark: |
-| 1.1.x   | :white_check_mark: |
-| < 1.1.4 | :x:                |
+| 2.0.x   | :white_check_mark: |
+| 1.2.x   | :white_check_mark: |
+| < 1.2   | :x:                |
 
 ## Reporting a Vulnerability
 
@@ -18,7 +15,7 @@ If you discover a security vulnerability in zone-new-companion, please report it
 ### How to Report
 
 1. **Email**: Send a detailed report to kidpoleon@proton.me (or use GitHub Security Advisory below)
-2. **GitHub Security**: Use the [GitHub Security Advisory](https://github.com/kidpoleon/zone-new-companion/security/advisories) feature
+2. **GitHub Security**: Use the [GitHub Security Advisory](https://github.com/pawl1234/zone-new-companion/security/advisories) feature
 3. **Private Issue**: Create a private issue on GitHub
 
 ### What to Include
@@ -63,8 +60,7 @@ If you discover a security vulnerability in zone-new-companion, please report it
 
 ### Third-Party Dependencies
 - VLC media player is used for stream playback
-- FFmpeg is used for stream analysis
-- Tesseract OCR is used for text recognition
+- libmpv is used for playback and stream verification
 - PyQt6 is used for the GUI framework
 
 ### Data Storage

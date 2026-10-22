@@ -93,7 +93,9 @@ def launch_stream(stream_url: str) -> None:
     # Build command with proper URL handling
     cmd = [
         vlc_path,
-        "--network-caching=1000",
+        "--network-caching=3000",
+        "--http-reconnect",
+        "--repeat",
         "--http-user-agent=Lavf/57.83.100",
         stream_url,
     ]

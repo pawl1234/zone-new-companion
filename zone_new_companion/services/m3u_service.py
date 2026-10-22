@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import requests
@@ -14,12 +15,18 @@ from zone_new_companion.services.network import DEFAULT_TIMEOUT, create_session
 from zone_new_companion.services.network_optimizer import OptimizedSession
 from zone_new_companion.services.logger_service import logger_service
 
+# Seconds to wait for an Xtream panel to start sending a get.php playlist.
+GET_PHP_READ_TIMEOUT = 60
+
 
 class M3UService(PortalService):
     """Service for M3U playlist parsing and streaming."""
 
     def __init__(self) -> None:
         self._session = OptimizedSession()
+        # get.php playlists are fetched without the optimizer: it caps the read
+        # timeout and repeats a timed-out request over several SSL profiles.
+        self._plain_session = create_session()
 
     def fetch_categories(self, credentials: Credentials) -> dict[str, list[PlaylistCategory]]:
         """Extract categories from M3U playlist."""
@@ -54,6 +61,13 @@ class M3UService(PortalService):
     def fetch_connection_info(self, credentials: Credentials) -> dict[str, str]:
         """M3U playlists don't have account info."""
         return {"Type": "M3U Playlist", "URL": credentials.base_url}
+
+    def fetch_playlist(self, url: str) -> str:
+        """The playlist's text, downloaded once (for the search index)."""
+        try:
+            return self._fetch_playlist_content(url)
+        except (RequestException, ValueError) as e:
+            raise RuntimeError(f"Failed to fetch playlist: {e}")
 
     def _fetch_playlist_content(self, url: str) -> str:
         """Fetch M3U playlist content with enhanced error handling."""
@@ -125,16 +139,15 @@ class M3UService(PortalService):
 
     def _fetch_from_get_php(self, url: str) -> str:
         """Handle XTREAM get.php URLs for M3U format."""
-        # This is a simplified implementation - in a real scenario, you might need
-        # to parse the get.php URL and make appropriate API calls
-        # For now, we'll try to fetch it as a direct M3U URL
-        response = self._session.get(url, timeout=DEFAULT_TIMEOUT)
+        # The panel builds the playlist on request, which can take a while on
+        # big servers before the first byte arrives.
+        response = self._plain_session.get(url, timeout=(DEFAULT_TIMEOUT, GET_PHP_READ_TIMEOUT))
         response.raise_for_status()
         return response.text
 
     def _parse_categories(self, content: str) -> list[PlaylistCategory]:
-        """Parse categories from M3U content and sort alphabetically."""
-        categories = set()
+        """Parse categories from M3U content in playlist order."""
+        categories: dict[str, None] = {}
         lines = content.split('\n')
         
         for line in lines:
@@ -143,21 +156,19 @@ class M3UService(PortalService):
                 # Extract category from group-title attribute
                 match = re.search(r'group-title="([^"]*)"', line)
                 if match:
-                    categories.add(match.group(1))
+                    categories.setdefault(match.group(1))
         
-        # Sort categories alphabetically and convert to PlaylistCategory objects
-        sorted_categories = sorted(categories, key=lambda x: x.lower())
         return [
             PlaylistCategory(
                 id=str(i),
                 name=category if category else "Uncategorized",
                 media_kind="live"
             )
-            for i, category in enumerate(sorted_categories)
+            for i, category in enumerate(categories)
         ]
 
     def _parse_category_items(self, content: str, category_id: str) -> list[MediaItem]:
-        """Parse items for a specific category from M3U content and sort alphabetically."""
+        """Parse items for a specific category from M3U content in playlist order."""
         items = []
         lines = content.split('\n')
         i = 0
@@ -190,10 +201,52 @@ class M3UService(PortalService):
                                 name=name,
                                 media_kind="live",
                                 item_type="channel",
+                                metadata={"category_id": category_id},
                                 stream_url=url
                             ))
             i += 1
         
-        # Sort items alphabetically (case-insensitive)
-        sorted_items = sorted(items, key=lambda x: x.name.lower())
-        return sorted_items
+        return items
+
+
+@dataclass(slots=True)
+class PlaylistEntry:
+    """One #EXTINF entry of an M3U playlist."""
+
+    name: str
+    url: str
+    group: str = ""
+    logo: str = ""
+    tvg_id: str = ""
+
+
+_ATTRIBUTE = re.compile(r'([\w-]+)="([^"]*)"')
+
+
+def parse_playlist(content: str) -> list[PlaylistEntry]:
+    """Every entry of a playlist in one pass, in playlist order.
+
+    The name follows the first comma after the attributes; attribute values
+    may hold commas themselves.
+    """
+    entries: list[PlaylistEntry] = []
+    pending: PlaylistEntry | None = None
+    for line in content.splitlines():
+        line = line.strip()
+        if line.startswith("#EXTINF:"):
+            info = line[len("#EXTINF:"):]
+            attributes = dict(_ATTRIBUTE.findall(info))
+            _head, _comma, name = _ATTRIBUTE.sub("", info).partition(",")
+            pending = PlaylistEntry(
+                name=name.strip() or attributes.get("tvg-name", ""),
+                url="",
+                group=attributes.get("group-title", ""),
+                logo=attributes.get("tvg-logo", ""),
+                tvg_id=attributes.get("tvg-id", ""),
+            )
+        elif line and not line.startswith("#") and pending is not None:
+            pending.url = line
+            if pending.name:
+                entries.append(pending)
+            pending = None
+    return entries

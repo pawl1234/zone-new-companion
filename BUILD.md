@@ -12,6 +12,28 @@ This guide explains how to build Zone New Companion for all supported platforms.
 
 ---
 
+## Quick Build (Scripts)
+
+Each script sets up `venv`, installs `requirements.txt`, fetches libmpv and runs
+PyInstaller. Run it on the platform you are building for; PyInstaller does not
+cross-compile.
+
+| Platform | Command | Output |
+|----------|---------|--------|
+| Windows | `powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1` | `dist\zone-new-companion.exe`: one file with libmpv inside |
+| macOS | `scripts/build_macos.sh` | `dist/Zone New Companion.app` and `dist/Zone-New-Companion-<version>.dmg` |
+
+- **Windows** downloads the latest `mpv-dev-x86_64` archive from
+  [shinchiro's mpv builds](https://github.com/shinchiro/mpv-winbuild-cmake/releases)
+  and caches `libmpv-2.dll` in `build\libmpv`. Unpacking it needs 7-Zip
+  (`winget install 7zip.7zip`) or Windows 11's `tar`. `-Libmpv <path>`
+  bundles a DLL you already have; `-NoLibmpv` builds without the built-in player.
+- **macOS** bundles Homebrew's libmpv (`brew install mpv`) with its dependencies.
+  The app runs on the build Mac's architecture and macOS version or newer.
+  `--no-libmpv` and `--no-dmg` skip those parts.
+
+---
+
 ## Prerequisites
 
 ### Common Requirements
@@ -54,6 +76,21 @@ For application dependencies:
 pip install -r requirements.txt
 ```
 
+### Built-in Player (libmpv)
+
+The built-in player needs the libmpv shared library next to the app. Without
+it the app still runs and plays everything in external VLC.
+
+| Platform | Get libmpv | Bundle with PyInstaller |
+|----------|-----------|-------------------------|
+| Windows | `mpv-dev-x86_64-*.7z` from [shinchiro's mpv builds](https://github.com/shinchiro/mpv-winbuild-cmake/releases); copy `libmpv-2.dll` into the project root | `--add-binary "libmpv-2.dll;."` |
+| macOS | `brew install mpv` | `cp -L /opt/homebrew/lib/libmpv.dylib build/libmpv.dylib`, then `--add-binary "build/libmpv.dylib:."` (PyInstaller collects its dependent dylibs; python-mpv only finds it under the name `libmpv.dylib`) |
+| Linux | `sudo apt install libmpv2` (Fedora: `mpv-libs`) | Not bundled; declared as a package dependency |
+
+License: the default libmpv builds are GPL. For an MIT release, ship an
+LGPL build of libmpv (mpv built with `-Dgpl=false`) or publish the libmpv
+source alongside it.
+
 ---
 
 ## Windows (.exe)
@@ -86,12 +123,9 @@ pip install -r requirements.txt
      --icon zone_new_companion\icon\icon.ico `
      --add-data "zone_new_companion\icon\icon.ico;zone_new_companion/icon" `
      --add-data "media;media" `
-     --hidden-import pytesseract `
-     --hidden-import cv2 `
-     --hidden-import numpy `
-     --hidden-import PIL `
-     --collect-all pytesseract `
-     --collect-all cv2 `
+     --add-data "zone_new_companion\ui\theme;zone_new_companion/ui/theme" `
+     --hidden-import mpv `
+     --add-binary "libmpv-2.dll;." `
      --exclude-module matplotlib `
      --exclude-module scipy `
      main.py
@@ -130,12 +164,7 @@ The icon is automatically embedded when using the `--icon` flag with PyInstaller
      --icon zone_new_companion/icon/icon.ico \
      --add-data "zone_new_companion/icon/icon.ico:zone_new_companion/icon" \
      --add-data "media:media" \
-     --hidden-import pytesseract \
-     --hidden-import cv2 \
-     --hidden-import numpy \
-     --hidden-import PIL \
-     --collect-all pytesseract \
-     --collect-all cv2 \
+     --add-data "zone_new_companion/ui/theme:zone_new_companion/ui/theme" \
      --exclude-module matplotlib \
      --exclude-module scipy \
      main.py
@@ -188,7 +217,8 @@ The icon is automatically embedded when using the `--icon` flag with PyInstaller
    Section: video
    Priority: optional
    Architecture: amd64
-   Depends: vlc, python3
+   Depends: libmpv2, python3
+   Recommends: vlc
    Maintainer: Kidpoleon <kidpoleon@proton.me>
    Description: Unified desktop IPTV companion app
     Zone New Companion is a unified desktop IPTV companion app
@@ -229,9 +259,10 @@ The icon is automatically embedded when using the `--icon` flag with PyInstaller
    Summary:        Unified desktop IPTV companion app
    
    License:        MIT
-   URL:            https://github.com/kidpoleon/zone-new-companion
+   URL:            https://github.com/pawl1234/zone-new-companion
    
-   Requires:       vlc
+   Requires:       mpv-libs
+   Recommends:     vlc
    
    %description
    Zone New Companion is a unified desktop IPTV companion app
@@ -277,12 +308,9 @@ The icon is automatically embedded when using the `--icon` flag with PyInstaller
      --icon zone_new_companion/icon/icon.icns \
      --add-data "zone_new_companion/icon/icon.icns:zone_new_companion/icon" \
      --add-data "media:media" \
-     --hidden-import pytesseract \
-     --hidden-import cv2 \
-     --hidden-import numpy \
-     --hidden-import PIL \
-     --collect-all pytesseract \
-     --collect-all cv2 \
+     --add-data "zone_new_companion/ui/theme:zone_new_companion/ui/theme" \
+     --hidden-import mpv \
+     --add-binary "build/libmpv.dylib:." \
      --exclude-module matplotlib \
      --exclude-module scipy \
      main.py
@@ -339,28 +367,33 @@ xcrun altool --notarize-app --primary-bundle-id "com.kidpoleon.zone-new-companio
 
 ## Automated Builds (GitHub Actions)
 
-This repository includes a GitHub Actions workflow that automatically builds and releases packages for all platforms.
+`.github/workflows/release.yml` builds and publishes a release whenever `main`
+gets a version that has no release yet.
 
-### How It Works
+### Releasing a Version
 
-1. Push a tag starting with 'v' (e.g., `v1.2.1`)
-2. GitHub Actions automatically:
-   - Creates a new release
-   - Builds for Windows, Linux, and macOS
-   - Attaches all binaries to the release
+1. Set `__version__` in `zone_new_companion/__init__.py` (and the other places
+   in the [Build Checklist](#build-checklist)).
+2. In `CHANGELOG.md`, rename `## [Unreleased]` to `## [<version>] - <date>` and
+   add an empty `## [Unreleased]` above it. The release fails without that section.
+3. Merge into `main`. GitHub Actions then:
+   - builds `zone-new-companion-<version>.exe` on Windows with `scripts/build_windows.ps1`
+   - builds `Zone-New-Companion-<version>.dmg` on macOS (Apple Silicon) with `scripts/build_macos.sh`
+   - creates the tag `v<version>` on the merge commit and a release with both files,
+     `SHA256SUMS.txt` and the version's changelog section as notes
 
-### Manual Trigger
-
-You can also trigger the workflow manually from the Actions tab.
+Pushes to `main` that keep the version skip the build. If a build fails, fix it
+and push again, or rerun the workflow from the Actions tab (*Run workflow*).
+To rebuild a version that is already released, delete its release and tag first.
 
 ### Required Secrets
 
-No additional secrets are required for basic builds. The workflow uses `GITHUB_TOKEN` which is automatically provided.
+None; the workflow uses the job's `GITHUB_TOKEN`. In the repository settings,
+Actions must be allowed to run (forks have them off until you enable them).
 
-For macOS code signing (optional):
-- `APPLE_DEVELOPER_ID`: Your Apple Developer ID
-- `APPLE_ID`: Your Apple ID email
-- `APPLE_APP_PASSWORD`: App-specific password
+The builds are not code signed: Windows SmartScreen warns on first start, and
+on macOS the app opens with right-click → *Open*. The macOS build runs on the
+runner's macOS version or newer, Apple Silicon only.
 
 ---
 
@@ -440,10 +473,12 @@ Place icon at `media/logo.png` (256x256 or larger).
 
 Before releasing, verify:
 
-- [ ] Version number updated in all files
+- [ ] Version number updated: `zone_new_companion/__init__.py`, the AppUserModelID in `zone_new_companion/app.py`, `README.md`, `SECURITY.md`, `chocolatey/zone-new-companion.nuspec`
+- [ ] `CHANGELOG.md` has a section for the version
 - [ ] Icon properly embedded
 - [ ] Application launches without errors
-- [ ] VLC integration works
+- [ ] Built-in player plays live TV, movies and series (libmpv bundled)
+- [ ] Right-click → Open in VLC works
 - [ ] All portal types tested (Xtream, Stalker, M3U)
 - [ ] Stream playback verified
 - [ ] No debug/console window shows (for windowed builds)
@@ -454,4 +489,4 @@ Before releasing, verify:
 
 For build issues, contact: **Kidpoleon** <kidpoleon@proton.me>
 
-Or open an issue on GitHub: https://github.com/kidpoleon/zone-new-companion/issues
+Or open an issue on GitHub: https://github.com/pawl1234/zone-new-companion/issues

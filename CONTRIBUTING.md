@@ -33,14 +33,12 @@ Thank you for your interest in contributing to zone-new-companion! This document
 - Python 3.8 or higher
 - Git
 - VLC media player
-- FFmpeg (for OCR functionality)
-- Tesseract OCR (for OCR functionality)
 
 ### Setup Steps
 
 1. **Clone Repository**
    ```bash
-   git clone https://github.com/kidpoleon/zone-new-companion.git
+   git clone https://github.com/pawl1234/zone-new-companion.git
    cd zone-new-companion
    ```
 

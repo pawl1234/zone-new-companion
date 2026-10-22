@@ -299,6 +299,125 @@ class StalkerService(PortalService):
         self._start_watchdog()
         return True
 
+    def _portal_json(self, session: requests.Session, params: dict[str, str], timeout: tuple[float, float]) -> Any:
+        """GET portal.php with the MAG headers; the decoded "js" payload."""
+        response = session.get(
+            self._get_portal_endpoint(),
+            params={**params, "JsHttpRequest": "1-xml"},
+            headers=self._headers(),
+            cookies=self._cookies(),
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        try:
+            payload = response.json()
+        except ValueError:
+            return {}
+        return payload.get("js", {}) if isinstance(payload, dict) else {}
+
+    def check_login(
+        self,
+        credentials: Credentials,
+        session: requests.Session,
+        timeout: tuple[float, float],
+    ) -> dict[str, str]:
+        """One-shot login check for the account checker (no keepalive thread).
+
+        Network errors propagate so the caller can tell an unreachable portal
+        from one that answers. Returns the account details, or raises
+        ``PermissionError`` when the portal refuses the MAC.
+        """
+        mac = self._normalize_mac(credentials.mac_address)
+        self._credentials = Credentials(
+            name=credentials.name,
+            base_url=credentials.base_url,
+            portal_type=credentials.portal_type,
+            username=credentials.username,
+            password=credentials.password,
+            mac_address=mac,
+        )
+        self._token = ""
+        self._generate_device_ids(mac)
+
+        handshake = self._portal_json(session, {"type": "stb", "action": "handshake", "token": ""}, timeout)
+        token = handshake.get("token", "") if isinstance(handshake, dict) else ""
+        if not token:
+            raise PermissionError("Portal refused the handshake")
+        self._token = str(token)
+
+        profile = self._portal_json(
+            session,
+            {
+                "type": "stb",
+                "action": "get_profile",
+                "hd": "1",
+                "sn": self._serial_number,
+                "stb_type": MAG_MODEL,
+                "device_id": self._device_id,
+                "device_id2": self._device_id2,
+                "auth_second_step": "1",
+            },
+            timeout,
+        )
+        profile = profile if isinstance(profile, dict) else {}
+        if str(profile.get("blocked", "0")) == "1":
+            raise PermissionError("MAC blocked by portal")
+        try:
+            main_info = self._portal_json(session, {"type": "account_info", "action": "get_main_info"}, timeout)
+        except requests.RequestException:
+            main_info = {}
+        main_info = main_info if isinstance(main_info, dict) else {}
+        # Unknown MACs get a profile without id and an empty account page.
+        if not profile.get("id") and not main_info.get("mac"):
+            raise PermissionError("MAC not registered on portal")
+
+        expiry = main_info.get("end_date") or main_info.get("phone") or profile.get("expire_billing_date") or ""
+        if isinstance(expiry, str) and expiry.isdigit():
+            expiry = datetime.fromtimestamp(int(expiry)).strftime("%Y-%m-%d %H:%M")
+        account = main_info.get("account") if isinstance(main_info.get("account"), dict) else {}
+        status = profile.get("status")
+        return {
+            "status": "Active" if str(status) in ("0", "") or status is None else str(status),
+            "expiry": str(expiry or "Unknown"),
+            "max_connections": str(account.get("max_online", profile.get("max_online", "N/A")) or "N/A"),
+            "active_connections": str(account.get("active_cons", "0") or "0"),
+            "timezone": str(profile.get("default_timezone", "") or "Unknown"),
+        }
+
+    def sample_live_stream_urls(
+        self,
+        session: requests.Session,
+        timeout: tuple[float, float],
+        limit: int,
+    ) -> list[str]:
+        """A few playable live URLs, after ``check_login`` succeeded."""
+        genres = self._portal_json(session, {"type": "itv", "action": "get_genres"}, timeout)
+        urls: list[str] = []
+        for genre in genres if isinstance(genres, list) else []:
+            if len(urls) >= limit:
+                break
+            if not isinstance(genre, dict) or str(genre.get("id", "")) in ("", "*"):
+                continue
+            listing = self._portal_json(
+                session, {"type": "itv", "action": "get_ordered_list", "genre": str(genre["id"]), "p": "1"}, timeout,
+            )
+            rows = listing.get("data", []) if isinstance(listing, dict) else []
+            for row in rows[:limit]:
+                cmd = str(row.get("cmd", "")) if isinstance(row, dict) else ""
+                if not cmd:
+                    continue
+                link = self._portal_json(session, {"type": "itv", "action": "create_link", "cmd": cmd}, timeout)
+                raw_url = (link.get("cmd") or link.get("url") or "") if isinstance(link, dict) else ""
+                url = self._clean_stream_url(str(raw_url), self._credentials) if raw_url else ""
+                if url.startswith(("http://", "https://")):
+                    urls.append(url)
+                if len(urls) >= limit:
+                    break
+            # Only the first genre that has channels is sampled.
+            if rows:
+                break
+        return urls
+
     def fetch_categories(self, credentials: Credentials) -> dict[str, list[PlaylistCategory]]:
         """Fetch channel categories."""
         self.connect(credentials)
@@ -340,7 +459,7 @@ class StalkerService(PortalService):
                     )
                     for row in rows
                 ]
-                grouped[tab] = sorted(categories, key=lambda x: x.name.lower())
+                grouped[tab] = categories
 
             except requests.RequestException as e:
                 logger_service.error(f"Failed to fetch {tab} categories: {e}")
@@ -388,7 +507,8 @@ class StalkerService(PortalService):
             )
             for row in rows
         ]
-        return sorted(items, key=lambda x: x.name.lower())
+        # get_ordered_list already returns the portal's channel order.
+        return items
 
     def resolve_stream_url(self, credentials: Credentials, item: MediaItem, retry: bool = False) -> str:
         """Resolve stream URL with multiple fallback strategies."""
