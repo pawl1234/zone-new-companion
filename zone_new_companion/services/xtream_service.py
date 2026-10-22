@@ -175,15 +175,12 @@ class XtreamService(PortalService):
     def _fetch_items(self, credentials: Credentials, media_kind: str, category_id: str | None) -> list[MediaItem]:
         if media_kind == "live":
             action = "get_live_streams"
-            prefix = "live"
             item_type = "channel"
         elif media_kind == "movies":
             action = "get_vod_streams"
-            prefix = "movie"
             item_type = "vod"
         else:
             action = "get_series"
-            prefix = "series"
             item_type = "series"
 
         extra_params = {"category_id": category_id} if category_id is not None else None
@@ -192,13 +189,10 @@ class XtreamService(PortalService):
         items: list[MediaItem] = []
         for row in rows:
             stream_id = row.get("stream_id") or row.get("series_id") or row.get("id")
-            ext = str(row.get("container_extension", "m3u8"))
             stream_url = None
             if stream_id and item_type in {"channel", "vod"}:
-                extension = "ts" if item_type == "channel" else ext
-                stream_url = normalize_url(
-                    credentials.base_url,
-                    f"{prefix}/{credentials.username}/{credentials.password}/{stream_id}.{extension}",
+                stream_url = stream_url_for(
+                    credentials, item_type, str(stream_id), str(row.get("container_extension", "m3u8")),
                 )
             items.append(
                 MediaItem(
@@ -351,6 +345,15 @@ class XtreamService(PortalService):
             return children
 
         return []
+
+
+def stream_url_for(credentials: Credentials, item_type: str, stream_id: str, extension: str) -> str:
+    """Direct URL of a live channel ("channel", always .ts) or a movie ("vod")."""
+    prefix, extension = ("live", "ts") if item_type == "channel" else ("movie", extension or "mp4")
+    return normalize_url(
+        credentials.base_url,
+        f"{prefix}/{credentials.username}/{credentials.password}/{stream_id}.{extension}",
+    )
 
 
 def _provider_num(row: dict) -> float:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from datetime import datetime
@@ -26,6 +27,8 @@ from zone_new_companion.services.bulk_checker import (
     now_stamp,
     result_from_credentials,
 )
+from zone_new_companion.services.catalog_indexer import INDEXED_PORTALS, MAX_AGE_SECONDS, index_account, server_of
+from zone_new_companion.services.catalog_store import CatalogAccount, CatalogStore, SearchHit
 from zone_new_companion.services.country_filter import codes_for_language, filter_items
 from zone_new_companion.services.filter_debug import FilterDebugDumper, debug_enabled
 from zone_new_companion.services.hls_probe import find_hls_url
@@ -33,7 +36,7 @@ from zone_new_companion.services.m3u_service import M3UService
 from zone_new_companion.services.player_launcher import launch_stream
 from zone_new_companion.services.stalker_service import StalkerService
 from zone_new_companion.services.stream_verifier import StreamVerifier
-from zone_new_companion.services.xtream_service import XtreamService
+from zone_new_companion.services.xtream_service import XtreamService, stream_url_for
 from zone_new_companion.state import StateStore
 from zone_new_companion.workers.task_worker import BulkCheckSignals, TaskWorker
 
@@ -43,7 +46,12 @@ LOGGER = logging.getLogger(__name__)
 class AppController:
     """Coordinate UI events, state, and services."""
 
-    def __init__(self, state_store: StateStore, config_store: ConfigStore) -> None:
+    def __init__(
+        self,
+        state_store: StateStore,
+        config_store: ConfigStore,
+        catalog: CatalogStore | None = None,
+    ) -> None:
         self._state_store = state_store
         self._config_store = config_store
         self._config: AppConfig = config_store.load()
@@ -69,6 +77,16 @@ class AppController:
         self._builtin_player: Callable[[str, MediaItem], None] | None = None
         # DEBUG=1 / --debug: write loaded lists and filter verdicts to disk.
         self._debug = FilterDebugDumper() if debug_enabled() else None
+        # Cross-account search: catalogs download one at a time on their own
+        # pool (gentle on providers, never blocks browsing), with a separate
+        # service so its endpoint cache and session stay off the UI's.
+        self._catalog = catalog
+        self._catalog_pool = QThreadPool()
+        self._catalog_pool.setMaxThreadCount(1)
+        self._index_service = XtreamService()
+        self._indexing: set[str] = set()
+        self._catalog_listener: Callable[[str], None] | None = None
+        self._search_generation = 0
         self._state_store.update(language=self._config.ui.language, language_strict=self._config.ui.language_strict)
 
     @property
@@ -410,14 +428,16 @@ class AppController:
         on_error: Callable[[str], None],
         prefer_hls: bool = False,
         use_vlc: bool = False,
+        profile: Credentials | None = None,
     ) -> None:
         """Resolve the stream and play it in the built-in player, or in VLC.
 
         VLC plays when use_vlc is set or the built-in player is unavailable.
         With prefer_hls the stream's HLS (.m3u8) variant plays instead; it is an
-        error when the server offers none.
+        error when the server offers none. ``profile`` defaults to the account
+        being browsed (search hits bring their own).
         """
-        profile = self._state_store.state.active_profile
+        profile = profile or self._state_store.state.active_profile
         if profile is None:
             on_error("No active profile.")
             return
@@ -799,6 +819,7 @@ class AppController:
             key=lambda account: (not account.starred, stream_rank[account.stream_ok]),
         )
         self._config_store.save(self._config)
+        self.sync_catalog()
 
     def merge_working_accounts(self, results: list[BulkResult]) -> list[BulkResult]:
         """Add a new bulk check's accounts to the saved ones.
@@ -920,6 +941,173 @@ class AppController:
         """Load a working account (any type) as the active profile and browse it."""
         self.connect(credentials_for(result), on_success=on_success, on_error=on_error)
 
+    # Cross-account catalog search ------------------------------------------------
+
+    def set_catalog_listener(self, listener: Callable[[str], None]) -> None:
+        """Receive the catalog's status line (what is indexed / indexing)."""
+        self._catalog_listener = listener
+
+    def sync_catalog(self) -> None:
+        """Mirror the working accounts into the catalog, then index what is missing.
+
+        Accounts that are down (red) stay but drop out of search results;
+        removed accounts lose their data (shared catalogs live on while any
+        account still uses them).
+        """
+        if self._catalog is None:
+            return
+        catalog = self._catalog
+        accounts = [
+            CatalogAccount(
+                key=catalog_key(account),
+                portal_type=account.portal_type,
+                label=f"{server_of(account.base_url)} · {account.username or account.mac_address or 'playlist'}",
+                alive=account.stream_ok is not False,
+                starred=account.starred,
+            )
+            for account in self._config.working_accounts
+        ]
+        worker = TaskWorker(lambda: catalog.sync_accounts(accounts))
+        worker.signals.succeeded.connect(lambda _result: self._schedule_indexing())
+        worker.signals.failed.connect(lambda message: LOGGER.error("Catalog sync failed: %s", message))
+        self._thread_pool.start(worker)
+
+    def _schedule_indexing(self) -> None:
+        if self._catalog is None:
+            return
+        by_key = {catalog_key(account): account for account in self._config.working_accounts}
+        pending = [
+            key for key in self._catalog.accounts_needing_index(MAX_AGE_SECONDS, INDEXED_PORTALS)
+            if key not in self._indexing and key in by_key
+        ]
+        for key in pending:
+            self._indexing.add(key)
+            self._start_index_job(key, credentials_for(by_key[key]))
+        self._report_catalog_status()
+
+    def _start_index_job(self, key: str, credentials: Credentials) -> None:
+        catalog = self._catalog
+        service = self._index_service
+
+        def task() -> str:
+            return index_account(catalog, service, credentials, key)
+
+        def on_finished() -> None:
+            self._indexing.discard(key)
+            self._report_catalog_status()
+
+        worker = TaskWorker(task)
+        worker.signals.succeeded.connect(lambda summary: LOGGER.info("Catalog: %s", summary))
+        worker.signals.failed.connect(
+            lambda message: LOGGER.warning("Indexing %s failed: %s", credentials.base_url, message),
+        )
+        worker.signals.finished.connect(on_finished)
+        self._catalog_pool.start(worker)
+
+    def _report_catalog_status(self) -> None:
+        """Push the status line (UI thread only)."""
+        if self._catalog is None or self._catalog_listener is None:
+            return
+        stats = self._catalog.stats()
+        text = (
+            f"{stats.indexed_accounts}/{stats.accounts} working accounts searchable · "
+            f"{stats.items:,} streams from {stats.sources} catalog{'s' if stats.sources != 1 else ''}"
+        )
+        if self._indexing:
+            text += f" · indexing {len(self._indexing)} account{'s' if len(self._indexing) != 1 else ''}…"
+        self._catalog_listener(text)
+
+    def search_catalog(
+        self,
+        text: str,
+        scope: str,
+        kind: str | None,
+        on_results: Callable[[list[SearchHit]], None],
+        on_error: Callable[[str], None],
+    ) -> None:
+        """Search every indexed account; ``scope`` is "all", "starred" or "active".
+
+        Results of an older search that finishes late are dropped.
+        """
+        if self._catalog is None:
+            on_results([])
+            return
+        account_key: str | None = None
+        if scope == "active":
+            profile = self._state_store.state.active_profile
+            if profile is None:
+                on_error("Open an account first to search only in it.")
+                return
+            account_key = catalog_key_for(profile)
+        self._search_generation += 1
+        generation = self._search_generation
+        catalog = self._catalog
+
+        def task() -> list[SearchHit]:
+            return catalog.search(text, kind=kind, account_key=account_key, starred_only=scope == "starred")
+
+        worker = TaskWorker(task)
+        worker.signals.succeeded.connect(
+            lambda hits: on_results(hits) if generation == self._search_generation else None,
+        )
+        worker.signals.failed.connect(lambda message: self._on_error(message, on_error))
+        self._thread_pool.start(worker)
+
+    def _account_for_hit(self, hit: SearchHit) -> BulkResult | None:
+        return next(
+            (account for account in self._config.working_accounts if catalog_key(account) == hit.account_key),
+            None,
+        )
+
+    def play_search_hit(
+        self,
+        hit: SearchHit,
+        on_success: Callable[[str], None],
+        on_error: Callable[[str], None],
+        use_vlc: bool = False,
+    ) -> None:
+        """Play a channel or movie found by search on the account that has it."""
+        account = self._account_for_hit(hit)
+        if account is None:
+            on_error("That account is no longer in the list.")
+            return
+        credentials = credentials_for(account)
+        item_type = "channel" if hit.kind == "live" else "vod"
+        item = MediaItem(
+            id=hit.provider_id,
+            name=hit.name,
+            media_kind=hit.kind,
+            item_type=item_type,
+            stream_url=stream_url_for(credentials, item_type, hit.provider_id, hit.extension),
+        )
+        self.play(item, on_success=on_success, on_error=on_error, use_vlc=use_vlc, profile=credentials)
+
+    def open_search_hit(
+        self,
+        hit: SearchHit,
+        on_opened: Callable[[str], None],
+        on_success: Callable[[str], None],
+        on_error: Callable[[str], None],
+    ) -> None:
+        """Browse the hit's account; a series opens straight into its seasons.
+
+        ``on_opened`` gets the tab ("Live", "Movies", "Series") to show.
+        """
+        account = self._account_for_hit(hit)
+        if account is None:
+            on_error("That account is no longer in the list.")
+            return
+        tab_name = {"live": "Live", "movies": "Movies"}.get(hit.kind, "Series")
+
+        def on_connected(message: str) -> None:
+            on_success(message)
+            on_opened(tab_name)
+            if hit.kind == "series":
+                series = MediaItem(id=hit.provider_id, name=hit.name, media_kind="series", item_type="series")
+                self.activate_item(tab_name, series, on_success=on_success, on_error=on_error)
+
+        self.connect_from_bulk(account, on_success=on_connected, on_error=on_error)
+
     def _remember_success(self, credentials: Credentials) -> None:
         LOGGER.info("Saving successful connection for %s", credentials.base_url)
         stamped = Credentials(
@@ -986,3 +1174,12 @@ class AppController:
         self._config.ui.width = width
         self._config.ui.height = height
         self._config_store.save(self._config)
+
+
+def catalog_key(account: BulkResult) -> str:
+    """The catalog's id for an account: a hash, so catalog.db holds no passwords."""
+    return hashlib.sha1("\x1f".join(account_key(account)).encode("utf-8")).hexdigest()
+
+
+def catalog_key_for(credentials: Credentials) -> str:
+    return catalog_key(result_from_credentials(credentials))

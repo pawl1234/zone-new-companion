@@ -7,7 +7,7 @@ from datetime import datetime
 from urllib.parse import urlparse
 
 from PyQt6.QtCore import QModelIndex, QSize, QSortFilterProxyModel, Qt, pyqtSignal
-from PyQt6.QtGui import QActionGroup, QColor, QFont, QGuiApplication, QIcon, QPainter, QPixmap
+from PyQt6.QtGui import QActionGroup, QColor, QFont, QGuiApplication, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -45,6 +45,7 @@ from zone_new_companion.ui.widgets.media_table import (
     MediaTableModel,
 )
 from zone_new_companion.ui.theme import set_role, set_variant, theme
+from zone_new_companion.ui.widgets.search_panel import SearchPanel
 from zone_new_companion.ui.widgets.toast import ToastLabel
 from zone_new_companion import __version__
 
@@ -96,7 +97,7 @@ class MainWindow(QMainWindow):
         "m3u": ("M3U", "m3u"),
         "stalker": ("STALKER", "stalker"),
     }
-    _TAB_ICONS = {"Live": "tv", "Movies": "film", "Series": "layers"}
+    _TAB_ICONS = {"Live": "tv", "Movies": "film", "Series": "layers", "Search": "search"}
 
     def __init__(self) -> None:
         super().__init__()
@@ -336,6 +337,10 @@ class MainWindow(QMainWindow):
             categories.itemClicked.connect(
                 lambda item, name=tab_name: self.category_selected.emit(name, item.data(Qt.ItemDataRole.UserRole)),
             )
+        # Cross-account search over the downloaded catalogs; Ctrl+F jumps here.
+        self.search_panel = SearchPanel()
+        self.tab_widget.addTab(self.search_panel, "Search")
+        QShortcut(QKeySequence.StandardKey.Find, self, activated=self.show_search)
         right_layout.addWidget(self.tab_widget, 1)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
@@ -361,6 +366,17 @@ class MainWindow(QMainWindow):
         self._account_results: list = []
         self._apply_theme_icons()
         theme.changed.connect(self._on_theme_changed)
+
+    def show_search(self) -> None:
+        self.tab_widget.setCurrentWidget(self.search_panel)
+        self.search_panel.focus_search()
+
+    def show_tab(self, tab_name: str) -> None:
+        """Bring a tab ("Live", "Movies", "Series", "Search") to the front."""
+        for index in range(self.tab_widget.count()):
+            if self.tab_widget.tabText(index) == tab_name:
+                self.tab_widget.setCurrentIndex(index)
+                return
 
     def set_theme_mode(self, mode: str) -> None:
         """Tick the View → Theme entry without emitting theme_mode_changed."""

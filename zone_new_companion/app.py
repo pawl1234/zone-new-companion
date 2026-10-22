@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 import sys
 import os
 from pathlib import Path
@@ -30,6 +31,7 @@ from PyQt6.QtCore import Qt
 from zone_new_companion.config import ConfigStore
 from zone_new_companion.controllers.app_controller import AppController
 from zone_new_companion.services import libmpv
+from zone_new_companion.services.catalog_store import CatalogStore
 from zone_new_companion.services.bulk_checker import BulkResult, friendly_error, is_server_unavailable
 from zone_new_companion.logging_config import configure_logging
 from zone_new_companion.services.filter_debug import DEBUG_DIR, debug_enabled
@@ -49,7 +51,7 @@ def run() -> None:
 
     config_store = ConfigStore(app_data / "config.json")
     state_store = StateStore()
-    controller = AppController(state_store, config_store)
+    controller = AppController(state_store, config_store, _open_catalog(app_data / "catalog.db"))
 
     qt_app = QApplication(sys.argv)
     qt_app.setApplicationName("zone-new-companion")
@@ -137,6 +139,27 @@ def run() -> None:
     window.working_accounts_recheck_requested.connect(lambda: _recheck_working_accounts(window, controller, on_error))
     window.show_working_accounts(controller.working_accounts(), announce=False)
 
+    panel = window.search_panel
+    panel.search_requested.connect(
+        lambda text, scope, kind: controller.search_catalog(
+            text, scope, kind, on_results=panel.show_hits, on_error=window.notify,
+        ),
+    )
+    panel.hit_play_requested.connect(
+        lambda hit, vlc: controller.play_search_hit(hit, on_success=window.notify, on_error=on_error, use_vlc=vlc),
+    )
+    panel.hit_open_requested.connect(
+        lambda hit: controller.open_search_hit(
+            hit,
+            on_opened=window.show_tab,
+            on_success=lambda message: _on_connect_success(window, controller, message),
+            on_error=on_error,
+        ),
+    )
+    # Accounts changing state (down, removed, newly indexed) re-run the search.
+    controller.set_catalog_listener(lambda text: (panel.set_status(text), panel.refresh()))
+    controller.sync_catalog()
+
     window.set_theme_mode(theme.mode)
     window.theme_mode_changed.connect(lambda mode: (theme.apply(qt_app, mode), controller.set_theme(mode)))
     window.set_language(controller.config.ui.language)
@@ -153,6 +176,19 @@ def run() -> None:
     window.show()
     
     sys.exit(qt_app.exec())
+
+
+def _open_catalog(path: Path) -> CatalogStore | None:
+    """The search catalog; a damaged file is a cache, so it is rebuilt. None disables search."""
+    for attempt in range(2):
+        try:
+            return CatalogStore(path)
+        except sqlite3.DatabaseError:
+            logging.getLogger(__name__).exception("Catalog %s unusable", path)
+            if attempt == 0:
+                for suffix in ("", "-wal", "-shm"):
+                    Path(f"{path}{suffix}").unlink(missing_ok=True)
+    return None
 
 
 def _create_player(controller: AppController):

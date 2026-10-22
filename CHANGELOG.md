@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Search across accounts**: New *Search* tab (Ctrl+F) finds movies, series and live channels in every working XTREAM account at once, filtered by account (all, starred, the one being browsed) and type
+  - Catalogs download in the background into `~/.zone-new-companion/catalog.db` and refresh daily; accounts on the same server with the same packages share one download
+  - Accounts that are down (red) drop out of the results right away; removing an account deletes its data
+  - Double-click plays a channel or movie on the account that has it, or opens a series' seasons
+
 ### Changed
 - **Stream Verification without external tools**: Verify now plays a few seconds of each stream headless through the bundled libmpv and reports *OK (Video+Audio)*, *OK (Video)*, *OK (Audio)* or why it is *OFF* (Unreachable, Timeout, Stalled, No Video/Audio)
   - Without libmpv it reads the stream's container instead (MPEG-TS, MP4, HLS, ADTS) and checks that video and audio packets arrive
