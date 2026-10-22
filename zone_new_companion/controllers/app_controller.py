@@ -1077,8 +1077,8 @@ class AppController:
         accounts = {catalog_key(account): account for account in self._indexable()}
         self._enqueue(accounts, self._catalog.needing_index(list(accounts), max_age), time.time() - max_age)
 
-    def refresh_index(self, account: BulkResult | None = None) -> str:
-        """Download the account's catalog again now, or every indexed one's (None).
+    def refresh_index(self, selected: list[BulkResult] | None = None) -> str:
+        """Download the selected accounts' catalogs again now, or every indexed one's (None).
 
         Accounts sharing a catalog download it once: whatever a refresh stored
         after the request counts as fresh. Returns a line for the user.
@@ -1086,15 +1086,24 @@ class AppController:
         if self._catalog is None:
             return "Search is not available."
         accounts = {catalog_key(item): item for item in self._indexable()}
-        if account is not None:
-            key = catalog_key(account)
-            if account.portal_type not in INDEXED_PORTALS:
-                return f"{account.portal_type.upper()} accounts are not searchable yet."
-            if key not in accounts:
-                if account.stream_ok is False:
-                    return "This account is down; Recheck it first."
-                return "This account is beyond the index limit (View → Search index)."
-            keys = [key]
+        skipped: list[str] = []
+        if selected is not None:
+            keys = []
+            for account in selected:
+                key = catalog_key(account)
+                if account.portal_type not in INDEXED_PORTALS:
+                    skipped.append(f"{account.portal_type.upper()} accounts are not searchable yet.")
+                elif key not in accounts:
+                    skipped.append(
+                        "This account is down; Recheck it first." if account.stream_ok is False
+                        else "This account is beyond the index limit (View → Search index).",
+                    )
+                elif key not in keys:
+                    keys.append(key)
+            if not keys and skipped:
+                if len(selected) == 1:
+                    return skipped[0]
+                return "None of the selected accounts can be indexed (down, not searchable or beyond the limit)."
         else:
             keys = list(accounts)
         if not keys:
@@ -1102,7 +1111,8 @@ class AppController:
         added = self._enqueue(accounts, keys, time.time())
         if not added:
             return "Already indexing."
-        return f"Refreshing the search index of {added} account{'s' if added != 1 else ''}…"
+        note = f" ({len(skipped)} skipped: down, not searchable or beyond the limit)" if skipped else ""
+        return f"Refreshing the search index of {added} account{'s' if added != 1 else ''}…{note}"
 
     def _enqueue(self, accounts: dict[str, BulkResult], keys: list[str], fresh_after: float) -> int:
         """Queue ``keys`` not queued yet and start the indexer; how many were added."""

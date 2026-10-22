@@ -130,8 +130,8 @@ def run() -> None:
     window.working_accounts_clear_requested.connect(
         lambda: _show_working_accounts(window, controller, []),
     )
-    window.working_account_remove_requested.connect(
-        lambda result: window.show_working_accounts(controller.remove_working_accounts([result]), announce=False),
+    window.working_accounts_remove_requested.connect(
+        lambda results: window.show_working_accounts(controller.remove_working_accounts(results), announce=False),
     )
     window.working_account_star_toggled.connect(
         lambda result: window.show_working_accounts(controller.toggle_working_account_star(result), announce=False),
@@ -166,7 +166,7 @@ def run() -> None:
     window.set_index_max_age(controller.index_max_age_hours)
     window.index_max_age_changed.connect(controller.set_index_max_age_hours)
     window.set_index_size_provider(controller.index_size)
-    window.index_refresh_requested.connect(lambda account: window.notify(controller.refresh_index(account)))
+    window.index_refresh_requested.connect(lambda accounts: window.notify(controller.refresh_index(accounts)))
     window.index_clear_requested.connect(lambda: controller.clear_index(window.notify, on_error))
     controller.sync_catalog()
 

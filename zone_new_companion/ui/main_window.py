@@ -73,7 +73,8 @@ class MainWindow(QMainWindow):
     bulk_check_requested = pyqtSignal()
     working_account_selected = pyqtSignal(object)
     working_accounts_clear_requested = pyqtSignal()
-    working_account_remove_requested = pyqtSignal(object)
+    # Carries the list of accounts to remove.
+    working_accounts_remove_requested = pyqtSignal(list)
     working_accounts_recheck_requested = pyqtSignal()
     working_account_star_toggled = pyqtSignal(object)
     history_selected = pyqtSignal(int)
@@ -86,7 +87,7 @@ class MainWindow(QMainWindow):
     index_limit_changed = pyqtSignal(int)
     # Hours after which catalogs are downloaded again.
     index_max_age_changed = pyqtSignal(int)
-    # Carries the account to re-index now, or None for all of them.
+    # Carries the list of accounts to re-index now, or None for all of them.
     index_refresh_requested = pyqtSignal(object)
     index_clear_requested = pyqtSignal()
 
@@ -250,7 +251,7 @@ class MainWindow(QMainWindow):
         accounts_buttons.addStretch(1)
         self.remove_account_button = set_variant(QPushButton("Remove"), "ghost")
         theme.bind_icon(self.remove_account_button, "x")
-        self.remove_account_button.setToolTip("Remove the selected account from the list")
+        self.remove_account_button.setToolTip("Remove the selected accounts from the list")
         self.remove_account_button.clicked.connect(self._emit_remove_account)
         accounts_buttons.addWidget(self.remove_account_button)
         self.clear_accounts_button = set_variant(QPushButton("Clear"), "danger")
@@ -269,7 +270,8 @@ class MainWindow(QMainWindow):
         self.accounts_table = QTableWidget()
         self.accounts_table.setToolTip(
             "Your accounts - click one to browse its streams,\n"
-            "click the ☆ to star it and keep it at the top",
+            "click the ☆ to star it and keep it at the top.\n"
+            "Shift/Ctrl-click or Ctrl+A selects several; right-click acts on all of them",
         )
         self.accounts_table.setColumnCount(len(self._ACCOUNT_COLUMNS))
         self.accounts_table.setHorizontalHeaderLabels(self._ACCOUNT_COLUMNS)
@@ -280,7 +282,8 @@ class MainWindow(QMainWindow):
         self.accounts_table.setAlternatingRowColors(True)
         self.accounts_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.accounts_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.accounts_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        # Shift/Ctrl(⌘)-click and Ctrl(⌘)+A select several accounts for the menu.
+        self.accounts_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         # Provider and Real URL are the focus, so they take the slack.
         for col in range(len(self._ACCOUNT_COLUMNS)):
             mode = (
@@ -291,6 +294,11 @@ class MainWindow(QMainWindow):
         self.accounts_table.cellClicked.connect(self._emit_working_account)
         self.accounts_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.accounts_table.customContextMenuRequested.connect(self._show_account_menu)
+        for key in (QKeySequence.StandardKey.Delete, QKeySequence(Qt.Key.Key_Backspace)):
+            QShortcut(
+                key, self.accounts_table, activated=self._emit_remove_account,
+                context=Qt.ShortcutContext.WidgetShortcut,
+            )
         accounts_layout.addWidget(self.accounts_table, 1)
 
         right = QWidget()
@@ -460,19 +468,53 @@ class MainWindow(QMainWindow):
         if answer == QMessageBox.StandardButton.Yes:
             self.index_clear_requested.emit()
 
+    def _selected_accounts(self) -> list:
+        """The selected rows' accounts, top to bottom."""
+        rows = sorted(index.row() for index in self.accounts_table.selectionModel().selectedRows())
+        cells = (self.accounts_table.item(row, self._STAR_COL) for row in rows)
+        results = (cell.data(Qt.ItemDataRole.UserRole) for cell in cells if cell is not None)
+        return [result for result in results if result is not None]
+
     def _show_account_menu(self, pos) -> None:
         row = self.accounts_table.rowAt(pos.y())
-        cell = self.accounts_table.item(row, self._STAR_COL) if row >= 0 else None
-        result = cell.data(Qt.ItemDataRole.UserRole) if cell is not None else None
-        if result is None:
+        if self.accounts_table.item(row, self._STAR_COL) is None:
             return
-        self.accounts_table.selectRow(row)
+        # Right-clicking outside the selection acts on that row alone, like a file manager.
+        if not self.accounts_table.selectionModel().isRowSelected(row):
+            self.accounts_table.clearSelection()
+            self.accounts_table.selectRow(row)
+        selected = self._selected_accounts()
+        if not selected:
+            return
+        suffix = f" ({len(selected)} accounts)" if len(selected) > 1 else ""
         menu = QMenu(self.accounts_table)
         # Built per click, so a plain icon: bind_icon would keep every menu alive.
         menu.addAction(
-            theme.icon("refresh-cw"), "Refresh search index", lambda: self.index_refresh_requested.emit(result),
+            theme.icon("refresh-cw"), f"Refresh search index{suffix}",
+            lambda: self.index_refresh_requested.emit(selected),
+        )
+        menu.addSeparator()
+        menu.addAction(
+            theme.icon("trash-2", "danger"), f"Remove{suffix}…" if suffix else "Remove",
+            lambda: self._remove_accounts(selected),
         )
         menu.exec(self.accounts_table.viewport().mapToGlobal(pos))
+
+    def _remove_accounts(self, accounts: list) -> None:
+        """Remove accounts; several at once ask first."""
+        if not accounts:
+            return
+        if len(accounts) > 1:
+            answer = QMessageBox.question(
+                self,
+                "Remove accounts",
+                f"Remove the {len(accounts)} selected accounts from the list?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.working_accounts_remove_requested.emit(accounts)
 
     def set_index_states(self, states: dict[tuple, tuple[str, str, str]]) -> None:
         """Update the Search column in place (no full redraw, selection stays)."""
@@ -522,10 +564,7 @@ class MainWindow(QMainWindow):
             self.working_accounts_clear_requested.emit()
 
     def _emit_remove_account(self) -> None:
-        row = self.accounts_table.currentRow()
-        cell = self.accounts_table.item(row, self._STAR_COL) if row >= 0 else None
-        if cell is not None and cell.data(Qt.ItemDataRole.UserRole) is not None:
-            self.working_account_remove_requested.emit(cell.data(Qt.ItemDataRole.UserRole))
+        self._remove_accounts(self._selected_accounts())
 
     def apply_state(self, state: AppState) -> None:
         """Render state changes; only the parts that changed are redrawn."""
@@ -707,6 +746,12 @@ class MainWindow(QMainWindow):
         cell.setFont(font)
 
     def _emit_working_account(self, row: int, col: int = 0) -> None:
+        # Shift/Ctrl(⌘)-clicks only change the selection; a plain click browses.
+        modifiers = QGuiApplication.keyboardModifiers()
+        if modifiers & (
+            Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier
+        ):
+            return
         cell = self.accounts_table.item(row, self._STAR_COL)
         if cell is None:
             return
