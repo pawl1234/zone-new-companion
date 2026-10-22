@@ -28,6 +28,8 @@ class UiSettings:
     language: str = ""
     # Hide categories that carry no tag of the chosen language.
     language_strict: bool = True
+    # Working accounts whose catalog is downloaded for search (0 = all).
+    search_index_limit: int = 5
 
 
 @dataclass(slots=True)
@@ -101,6 +103,7 @@ class ConfigStore:
             height=int(ui_payload.get("height", 760)),
             language=str(ui_payload.get("language", "")),
             language_strict=bool(ui_payload.get("language_strict", True)),
+            search_index_limit=max(0, int(ui_payload.get("search_index_limit", 5))),
         )
         working_accounts = [
             BulkResult(

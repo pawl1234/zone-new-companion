@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from typing import Callable
 from urllib.parse import urlparse
 
 from zone_new_companion.models import Credentials, MediaItem, PlaylistCategory
@@ -18,6 +19,8 @@ LOGGER = logging.getLogger(__name__)
 MAX_AGE_SECONDS = 24 * 3600
 # Portal types the indexer can read; the rest is skipped for now.
 INDEXED_PORTALS = ("xtream",)
+# Accounts indexed at most unless the user picks another limit (0 = all).
+DEFAULT_INDEX_LIMIT = 5
 # fetch_categories' tab names -> media kinds.
 _KINDS = {"Live": "live", "Movies": "movies", "Series": "series"}
 
@@ -40,10 +43,17 @@ def index_account(
     credentials: Credentials,
     account_key: str,
     max_age_seconds: float = MAX_AGE_SECONDS,
+    cancelled: Callable[[], bool] = lambda: False,
 ) -> str:
-    """Index one Xtream account; returns a short summary for the status line."""
+    """Index one Xtream account; returns a short summary for the status line.
+
+    ``cancelled`` is checked between downloads (the app is closing); a
+    cancelled run stores nothing.
+    """
     server = server_of(credentials.base_url)
     categories = service.fetch_categories(credentials)
+    if cancelled():
+        return f"{server}: cancelled"
     fingerprint = catalog_fingerprint(credentials.base_url, categories)
     source_id = store.fresh_source(fingerprint, max_age_seconds)
     if source_id is not None:
@@ -53,14 +63,18 @@ def index_account(
 
     items: list[CatalogItem] = []
     for tab, kind in _KINDS.items():
+        if cancelled():
+            return f"{server}: cancelled"
         names = {category.id: category.name for category in categories[tab]}
         # Category tags are the same for all its streams: detect them once.
         langs = {category_id: frozenset(detect_countries(name)) for category_id, name in names.items()}
-        for media in _fetch_kind(service, credentials, kind, categories[tab]):
+        for media in _fetch_kind(service, credentials, kind, categories[tab], cancelled):
             items.append(_catalog_item(media, names, langs))
     category_rows = [
         (_KINDS[tab], category.id, category.name) for tab, rows in categories.items() for category in rows
     ]
+    if cancelled():
+        return f"{server}: cancelled"
     count = store.replace_source(account_key, fingerprint, server, category_rows, items)
     return f"{server}: {count:,} streams indexed"
 
@@ -70,6 +84,7 @@ def _fetch_kind(
     credentials: Credentials,
     kind: str,
     categories: list[PlaylistCategory],
+    cancelled: Callable[[], bool],
 ) -> list[MediaItem]:
     """Every stream of a kind; per category when the panel refuses the all-in-one call."""
     try:
@@ -80,6 +95,8 @@ def _fetch_kind(
     if items or not categories:
         return items
     for category in categories:
+        if cancelled():
+            break
         try:
             items.extend(service.fetch_items(credentials, category))
         except RuntimeError as exc:

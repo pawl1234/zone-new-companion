@@ -279,8 +279,14 @@ class CatalogStore:
 
     # Accounts -----------------------------------------------------------------
 
-    def sync_accounts(self, accounts: Iterable[CatalogAccount]) -> None:
-        """Mirror the working-accounts list; removed accounts and their orphaned data go."""
+    def sync_accounts(self, accounts: Iterable[CatalogAccount], unindexed: Iterable[str] = ()) -> None:
+        """Mirror the working-accounts list; removed accounts and their orphaned data go.
+
+        ``unindexed`` accounts (beyond the index limit) lose their catalog link,
+        so they are not searched and their data goes unless another account
+        shares it.
+        """
+        unlink = [(key,) for key in unindexed]
         rows = [
             (
                 a.key, a.portal_type, a.label, int(a.alive), int(a.starred),
@@ -305,6 +311,7 @@ class CatalogStore:
                     "max_conn = excluded.max_conn, active_conn = excluded.active_conn",
                     rows,
                 )
+                connection.executemany("UPDATE account SET source_id = NULL WHERE key = ?", unlink)
                 purged = self._purge_orphans(connection)
                 connection.execute("COMMIT")
             except BaseException:
@@ -330,16 +337,18 @@ class CatalogStore:
             "DELETE FROM source WHERE id NOT IN (SELECT source_id FROM account WHERE source_id IS NOT NULL)",
         ).rowcount
 
-    def accounts_needing_index(self, max_age_seconds: float, portal_types: tuple[str, ...]) -> list[str]:
-        """Keys of alive accounts with no catalog yet or an outdated one."""
-        marks = ",".join("?" for _ in portal_types)
+    def needing_index(self, keys: list[str], max_age_seconds: float) -> list[str]:
+        """Of ``keys`` (in order), those with no catalog yet or an outdated one."""
+        info = self.index_info()
+        cutoff = time.time() - max_age_seconds
+        return [key for key in keys if key not in info or info[key][0] < cutoff]
+
+    def index_info(self) -> dict[str, tuple[float, int]]:
+        """(indexed_at, stream count) per account that has a catalog."""
         rows = self._conn().execute(
-            f"SELECT a.key FROM account a LEFT JOIN source s ON s.id = a.source_id "
-            f"WHERE a.alive = 1 AND a.portal_type IN ({marks}) "
-            f"AND (s.id IS NULL OR s.indexed_at < ?) ORDER BY a.starred DESC",
-            (*portal_types, time.time() - max_age_seconds),
+            "SELECT a.key, s.indexed_at, s.item_count FROM account a JOIN source s ON s.id = a.source_id",
         ).fetchall()
-        return [row[0] for row in rows]
+        return {key: (indexed_at, count) for key, indexed_at, count in rows}
 
     # Sources ------------------------------------------------------------------
 

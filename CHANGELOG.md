@@ -14,11 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Double-click plays a channel or movie on the account that has it, or opens a series' seasons
   - The same title on several accounts is one row ("in 7 accounts") with its year, quality and languages; double-click plays on the best account (starred, streaming, free connection, best quality), expanding the row lists every copy
   - Filters for quality, release year, recently added, category, streaming accounts, free connections and expiry; sorting by match, year, date added, number of accounts or title; the Language setting applies to the search as well
+  - Only the first 5 working accounts are indexed by default (starred first, then the ones that stream); View → Search index changes the limit, and a new *Search* column in Working Accounts shows each account's state (Indexed, Indexing…, Queued, Not indexed, Paused)
+  - Results that update in the background keep expanded rows, the selection and the scroll position
 
 ### Changed
 - **Stream Verification without external tools**: Verify now plays a few seconds of each stream headless through the bundled libmpv and reports *OK (Video+Audio)*, *OK (Video)*, *OK (Audio)* or why it is *OFF* (Unreachable, Timeout, Stalled, No Video/Audio)
   - Without libmpv it reads the stream's container instead (MPEG-TS, MP4, HLS, ADTS) and checks that video and audio packets arrive
   - At most 4 streams are probed at once; streams refused at connect are retried one by one, so accounts limited to one connection verify correctly
+
+### Fixed
+- **Closing the app during background work**: Closing while catalogs were indexing (or a check was running) crashed Python on exit; indexing now stops and the app closes cleanly
 
 ### Removed
 - **FFprobe, FFmpeg and Tesseract OCR**: No longer used; the opencv-python, pytesseract, Pillow and numpy requirements are gone, too

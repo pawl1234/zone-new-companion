@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import queue
 import re
+import threading
+import time
 from dataclasses import replace
 from datetime import datetime
 from typing import Callable
@@ -12,7 +15,7 @@ from urllib.parse import parse_qs, urlparse
 
 from zone_new_companion.services.logger_service import logger_service
 
-from PyQt6.QtCore import QRunnable, QThreadPool
+from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
 
 from zone_new_companion.config import AppConfig, ConfigStore
 from zone_new_companion.models import Credentials, MediaItem, PlaylistCategory, PortalType
@@ -39,7 +42,7 @@ from zone_new_companion.services.stalker_service import StalkerService
 from zone_new_companion.services.stream_verifier import StreamVerifier
 from zone_new_companion.services.xtream_service import XtreamService, stream_url_for
 from zone_new_companion.state import StateStore
-from zone_new_companion.workers.task_worker import BulkCheckSignals, TaskWorker
+from zone_new_companion.workers.task_worker import BulkCheckSignals, TaskWorker, safe_emit
 
 LOGGER = logging.getLogger(__name__)
 
@@ -78,15 +81,22 @@ class AppController:
         self._builtin_player: Callable[[str, MediaItem], None] | None = None
         # DEBUG=1 / --debug: write loaded lists and filter verdicts to disk.
         self._debug = FilterDebugDumper() if debug_enabled() else None
-        # Cross-account search: catalogs download one at a time on their own
-        # pool (gentle on providers, never blocks browsing), with a separate
-        # service so its endpoint cache and session stay off the UI's.
+        # Cross-account search: catalogs download one at a time on a daemon
+        # thread (gentle on providers, never blocks browsing or closing the
+        # app), with a separate service so its session stays off the UI's.
         self._catalog = catalog
-        self._catalog_pool = QThreadPool()
-        self._catalog_pool.setMaxThreadCount(1)
         self._index_service = XtreamService()
-        self._indexing: set[str] = set()
-        self._catalog_listener: Callable[[str], None] | None = None
+        self._index_queue: queue.Queue[tuple[str, Credentials] | None] = queue.Queue()
+        self._index_stop = threading.Event()
+        self._index_thread: threading.Thread | None = None
+        # Created here, in the UI thread, so its signals arrive there.
+        self._index_signals = _IndexSignals()
+        self._index_signals.started.connect(self._on_index_started)
+        self._index_signals.done.connect(self._on_index_done)
+        self._indexing: set[str] = set()  # queued or running
+        self._index_running: str | None = None
+        self._index_errors: dict[str, str] = {}
+        self._catalog_listener: Callable[[str, dict], None] | None = None
         self._search_generation = 0
         self._state_store.update(language=self._config.ui.language, language_strict=self._config.ui.language_strict)
 
@@ -783,7 +793,7 @@ class AppController:
         self._bulk_checker = checker
 
         def emit_progress(result: BulkResult, done: int, total: int) -> None:
-            signals.progress.emit(result, done, total)
+            safe_emit(signals.progress, result, done, total)
 
         def task() -> list[BulkResult]:
             return check(checker, emit_progress)
@@ -792,11 +802,11 @@ class AppController:
             def run(self_inner) -> None:  # noqa: N805
                 try:
                     results = task()
-                    signals.succeeded.emit(results)
                 except Exception as exc:  # noqa: BLE001
-                    signals.failed.emit(str(exc))
-                finally:
-                    signals.finished.emit()
+                    safe_emit(signals.failed, str(exc))
+                else:
+                    safe_emit(signals.succeeded, results)
+                safe_emit(signals.finished)
 
         self._thread_pool.start(_BulkRunnable())
         return signals
@@ -944,16 +954,41 @@ class AppController:
 
     # Cross-account catalog search ------------------------------------------------
 
-    def set_catalog_listener(self, listener: Callable[[str], None]) -> None:
-        """Receive the catalog's status line (what is indexed / indexing)."""
+    def set_catalog_listener(self, listener: Callable[[str, dict], None]) -> None:
+        """Receive the search status line and each working account's index state.
+
+        The states map ``account_key(account)`` to (text, tooltip, color token).
+        """
         self._catalog_listener = listener
+
+    @property
+    def index_limit(self) -> int:
+        return self._config.ui.search_index_limit
+
+    def set_index_limit(self, limit: int) -> None:
+        """Index at most ``limit`` working accounts (0 = all) and apply it now."""
+        self._config.ui.search_index_limit = max(0, limit)
+        self._config_store.save(self._config)
+        self.sync_catalog()
+
+    def _indexable(self) -> list[BulkResult]:
+        """The accounts whose catalog is kept: the first ``limit`` up and indexable ones.
+
+        The list order decides (starred first, then streaming), so starring an
+        account brings it in.
+        """
+        candidates = [
+            account for account in self._config.working_accounts
+            if account.portal_type in INDEXED_PORTALS and account.stream_ok is not False
+        ]
+        return candidates[: self.index_limit] if self.index_limit else candidates
 
     def sync_catalog(self) -> None:
         """Mirror the working accounts into the catalog, then index what is missing.
 
         Accounts that are down (red) stay but drop out of search results;
-        removed accounts lose their data (shared catalogs live on while any
-        account still uses them).
+        removed accounts, and accounts beyond the index limit, lose their data
+        (shared catalogs live on while any account still uses them).
         """
         if self._catalog is None:
             return
@@ -972,55 +1007,135 @@ class AppController:
             )
             for account in self._config.working_accounts
         ]
-        worker = TaskWorker(lambda: catalog.sync_accounts(accounts))
+        indexable = {catalog_key(account) for account in self._indexable()}
+        # Down accounts keep their catalog for when they come back.
+        unindexed = [
+            item.key for item in accounts
+            if item.alive and item.portal_type in INDEXED_PORTALS and item.key not in indexable
+        ]
+        worker = TaskWorker(lambda: catalog.sync_accounts(accounts, unindexed))
         worker.signals.succeeded.connect(lambda _result: self._schedule_indexing())
         worker.signals.failed.connect(lambda message: LOGGER.error("Catalog sync failed: %s", message))
         self._thread_pool.start(worker)
 
     def _schedule_indexing(self) -> None:
-        if self._catalog is None:
+        if self._catalog is None or self._index_stop.is_set():
             return
-        by_key = {catalog_key(account): account for account in self._config.working_accounts}
-        pending = [
-            key for key in self._catalog.accounts_needing_index(MAX_AGE_SECONDS, INDEXED_PORTALS)
-            if key not in self._indexing and key in by_key
-        ]
-        for key in pending:
-            self._indexing.add(key)
-            self._start_index_job(key, credentials_for(by_key[key]))
+        accounts = {catalog_key(account): account for account in self._indexable()}
+        for key in self._catalog.needing_index(list(accounts), MAX_AGE_SECONDS):
+            if key not in self._indexing:
+                self._indexing.add(key)
+                self._index_queue.put((key, credentials_for(accounts[key])))
+        if self._indexing and self._index_thread is None:
+            self._index_thread = threading.Thread(target=self._index_loop, name="catalog-indexer", daemon=True)
+            self._index_thread.start()
         self._report_catalog_status()
 
-    def _start_index_job(self, key: str, credentials: Credentials) -> None:
-        catalog = self._catalog
-        service = self._index_service
+    def _index_loop(self) -> None:
+        """Indexer thread: one queued account after the other until shutdown."""
+        catalog, service, stop = self._catalog, self._index_service, self._index_stop
+        while not stop.is_set():
+            job = self._index_queue.get()
+            if job is None or stop.is_set():
+                return
+            key, credentials = job
+            safe_emit(self._index_signals.started, key)
+            try:
+                summary = index_account(catalog, service, credentials, key, cancelled=stop.is_set)
+            except Exception as exc:  # noqa: BLE001 - reported per account, the loop goes on
+                if stop.is_set():
+                    return
+                safe_emit(self._index_signals.done, key, "", str(exc))
+            else:
+                safe_emit(self._index_signals.done, key, summary, "")
 
-        def task() -> str:
-            return index_account(catalog, service, credentials, key)
+    def _on_index_started(self, key: str) -> None:
+        self._index_running = key
+        self._report_catalog_status()
 
-        def on_finished() -> None:
-            self._indexing.discard(key)
-            self._report_catalog_status()
+    def _on_index_done(self, key: str, summary: str, error: str) -> None:
+        self._indexing.discard(key)
+        self._index_running = None
+        if error:
+            LOGGER.warning("Indexing failed: %s", error)
+            self._index_errors[key] = error
+        else:
+            LOGGER.info("Catalog: %s", summary)
+            self._index_errors.pop(key, None)
+        self._report_catalog_status()
 
-        worker = TaskWorker(task)
-        worker.signals.succeeded.connect(lambda summary: LOGGER.info("Catalog: %s", summary))
-        worker.signals.failed.connect(
-            lambda message: LOGGER.warning("Indexing %s failed: %s", credentials.base_url, message),
-        )
-        worker.signals.finished.connect(on_finished)
-        self._catalog_pool.start(worker)
+    def shutdown(self) -> None:
+        """Stop indexing and wait briefly for background work; call when the app quits.
+
+        A download in progress is abandoned (the thread is a daemon), nothing
+        half-done is stored.
+        """
+        self._index_stop.set()
+        self.cancel_bulk_check()
+        while True:
+            try:
+                self._index_queue.get_nowait()
+            except queue.Empty:
+                break
+        self._index_queue.put(None)
+        if self._index_thread is not None:
+            self._index_thread.join(timeout=2)
+        self._thread_pool.clear()
+        self._thread_pool.waitForDone(3000)
 
     def _report_catalog_status(self) -> None:
-        """Push the status line (UI thread only)."""
+        """Push the status line and per-account states (UI thread only)."""
         if self._catalog is None or self._catalog_listener is None:
             return
-        stats = self._catalog.stats()
-        text = (
-            f"{stats.indexed_accounts}/{stats.accounts} working accounts searchable · "
-            f"{stats.items:,} streams from {stats.sources} catalog{'s' if stats.sources != 1 else ''}"
+        info = self._catalog.index_info()
+        indexable = {catalog_key(account) for account in self._indexable()}
+        states = {
+            account_key(account): self._index_state(account, catalog_key(account), indexable, info)
+            for account in self._config.working_accounts
+        }
+        searchable = sum(
+            1 for account in self._config.working_accounts
+            if account.stream_ok is not False and catalog_key(account) in info
         )
+        limit = f"limit {self.index_limit}" if self.index_limit else "no limit"
+        text = f"{searchable} account{'s' if searchable != 1 else ''} searchable ({limit})"
+        streams = sum(count for _indexed_at, count in {info[key] for key in indexable if key in info})
+        if streams:
+            text += f" · {streams:,} streams"
         if self._indexing:
             text += f" · indexing {len(self._indexing)} account{'s' if len(self._indexing) != 1 else ''}…"
-        self._catalog_listener(text)
+        self._catalog_listener(text, states)
+
+    def _index_state(
+        self,
+        account: BulkResult,
+        key: str,
+        indexable: set[str],
+        info: dict[str, tuple[float, int]],
+    ) -> tuple[str, str, str]:
+        """(text, tooltip, color token) for the account's search column."""
+        if account.portal_type not in INDEXED_PORTALS:
+            return "—", f"{account.portal_type.upper()} accounts are not searchable yet", "text_disabled"
+        if account.stream_ok is False:
+            return "Paused", "Down right now: left out of search until a Recheck finds it working", "text_muted"
+        if key == self._index_running:
+            return "Indexing…", "Downloading this account's catalog", "accent"
+        if key in self._indexing:
+            return "Queued", "Waiting for the accounts ahead of it", "text_muted"
+        if key in info:
+            indexed_at, count = info[key]
+            return "Indexed", f"{count:,} streams, updated {_ago(indexed_at)}", "success"
+        if key in self._index_errors:
+            return "Failed", f"Indexing failed: {self._index_errors[key]}\nRetried on the next change or restart", "danger"
+        if key not in indexable:
+            limit = self.index_limit
+            return (
+                "Not indexed",
+                f"Only the first {limit} working accounts are searchable (starred first).\n"
+                "Star this account or raise the limit under View → Search index.",
+                "text_muted",
+            )
+        return "Waiting", "Will be indexed shortly", "text_muted"
 
     def search_catalog(
         self,
@@ -1196,6 +1311,24 @@ def catalog_key(account: BulkResult) -> str:
 def catalog_key_for(credentials: Credentials) -> str:
     return catalog_key(result_from_credentials(credentials))
 
+
+
+class _IndexSignals(QObject):
+    """The indexer thread reports here; slots run in the UI thread."""
+
+    started = pyqtSignal(str)
+    # (account key, summary, error)
+    done = pyqtSignal(str, str, str)
+
+
+def _ago(timestamp: float) -> str:
+    minutes = int((time.time() - timestamp) // 60)
+    if minutes < 1:
+        return "just now"
+    if minutes < 60:
+        return f"{minutes} min ago"
+    hours = minutes // 60
+    return f"{hours} h ago" if hours < 24 else f"{hours // 24} d ago"
 
 
 def _expiry_timestamp(expiry: str) -> float | None:

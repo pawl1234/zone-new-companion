@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from zone_new_companion.services.bulk_checker import account_key
 from zone_new_companion.services.country_filter import LANGUAGES, codes_for_language, filter_categories, filter_items
 from zone_new_companion.state import AppState
 from zone_new_companion.ui.widgets.add_account_dialog import ACCOUNT_TYPES
@@ -80,17 +81,23 @@ class MainWindow(QMainWindow):
     language_strict_changed = pyqtSignal(bool)
     debug_dump_requested = pyqtSignal()
     theme_mode_changed = pyqtSignal(str)
+    # How many working accounts are indexed for search (0 = all).
+    index_limit_changed = pyqtSignal(int)
 
     # Ordered by importance: type + provider + real URL lead, account details follow.
     # The leading star column pins an account to the top of the list.
     # "Streams" is the second stage: login works (Status) vs. video actually flows.
+    # "Search" tells whether the account's catalog is indexed for the Search tab.
     _ACCOUNT_COLUMNS = [
-        "★", "Type", "Streams", "Provider", "Real URL", "Account", "Status", "Expiry", "Connections", "Timezone",
+        "★", "Type", "Streams", "Search", "Provider", "Real URL", "Account", "Status", "Expiry", "Connections",
+        "Timezone",
     ]
     _STAR_COL = 0
     _TYPE_COL = 1
     _STREAM_COL = 2
-    _STRETCH_COLS = (3, 4)
+    _SEARCH_COL = 3
+    _STRETCH_COLS = (4, 5)
+    _INDEX_LIMITS = (3, 5, 10, 20, 0)
     # Badge text and color token per PortalType value.
     _TYPE_BADGES = {
         "xtream": ("XTREAM", "xtream"),
@@ -120,6 +127,17 @@ class MainWindow(QMainWindow):
             action.setData(mode)
             self._theme_actions.addAction(action)
         self._theme_actions.triggered.connect(lambda action: self.theme_mode_changed.emit(action.data()))
+
+        index_menu = self._view_menu.addMenu("Search index")
+        index_menu.setToolTipsVisible(True)
+        self._index_limit_actions = QActionGroup(self)
+        for limit in self._INDEX_LIMITS:
+            action = index_menu.addAction(f"Index up to {limit} accounts" if limit else "Index all accounts")
+            action.setCheckable(True)
+            action.setData(limit)
+            action.setToolTip("Starred accounts come first, then the ones that stream")
+            self._index_limit_actions.addAction(action)
+        self._index_limit_actions.triggered.connect(lambda action: self.index_limit_changed.emit(action.data()))
 
         self._help_info_action = self._help_menu.addAction("Info")
         theme.bind_icon(self._help_info_action, "info")
@@ -364,6 +382,8 @@ class MainWindow(QMainWindow):
         self.setStatusBar(status)
 
         self._account_results: list = []
+        # account_key -> (text, tooltip, color token) for the Search column.
+        self._index_states: dict[tuple, tuple[str, str, str]] = {}
         self._apply_theme_icons()
         theme.changed.connect(self._on_theme_changed)
 
@@ -377,6 +397,26 @@ class MainWindow(QMainWindow):
             if self.tab_widget.tabText(index) == tab_name:
                 self.tab_widget.setCurrentIndex(index)
                 return
+
+    def set_index_limit(self, limit: int) -> None:
+        """Tick the View → Search index entry without emitting index_limit_changed."""
+        for action in self._index_limit_actions.actions():
+            action.setChecked(action.data() == limit)
+
+    def set_index_states(self, states: dict[tuple, tuple[str, str, str]]) -> None:
+        """Update the Search column in place (no full redraw, selection stays)."""
+        self._index_states = dict(states)
+        for row in range(self.accounts_table.rowCount()):
+            star = self.accounts_table.item(row, self._STAR_COL)
+            cell = self.accounts_table.item(row, self._SEARCH_COL)
+            if star is not None and cell is not None and star.data(Qt.ItemDataRole.UserRole) is not None:
+                self._fill_search_cell(cell, star.data(Qt.ItemDataRole.UserRole))
+
+    def _fill_search_cell(self, cell: QTableWidgetItem, result) -> None:
+        text, tip, token = self._index_states.get(account_key(result), ("", "", "text_muted"))
+        cell.setText(text)
+        cell.setToolTip(tip)
+        cell.setForeground(theme.color(token))
 
     def set_theme_mode(self, mode: str) -> None:
         """Tick the View → Theme entry without emitting theme_mode_changed."""
@@ -496,6 +536,7 @@ class MainWindow(QMainWindow):
                 "",
                 "",
                 "",
+                "",
                 provider,
                 result.real_url or result.base_url,
                 result.username or result.mac_address or "—",
@@ -518,6 +559,8 @@ class MainWindow(QMainWindow):
                     self._fill_type_cell(cell, result.portal_type)
                 elif col == self._STREAM_COL:
                     self._fill_stream_cell(cell, result)
+                elif col == self._SEARCH_COL:
+                    self._fill_search_cell(cell, result)
                 self.accounts_table.setItem(row, col, cell)
         counts: dict[str, int] = {}
         for result in results:

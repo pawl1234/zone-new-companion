@@ -138,6 +138,10 @@ class SearchPanel(QWidget):
         for combo in (self.scope_combo, self.kind_combo, self.sort_combo):
             combo.currentIndexChanged.connect(lambda _index: self._emit_search())
         self._last_result = SearchResult([])
+        # Set while a search started by a background change (an account got
+        # indexed, went down, was removed) is pending: its result is merged
+        # in without collapsing what the user opened or scrolled to.
+        self._background_pending = False
         self._catalog_status = ""
         theme.changed.connect(self._on_theme_changed)
 
@@ -211,10 +215,13 @@ class SearchPanel(QWidget):
         self.query_edit.setFocus()
         self.query_edit.selectAll()
 
-    def refresh(self) -> None:
-        """Run the current search again (e.g. after accounts or the language changed)."""
+    def refresh(self, background: bool = False) -> None:
+        """Run the current search again (e.g. after accounts or the language changed).
+
+        ``background``: the user did not ask for it, so their view is kept.
+        """
         if len(self.query_edit.text().strip()) >= 2:
-            self._emit_search()
+            self._emit_search(background=background)
 
     def set_status(self, text: str) -> None:
         self._catalog_status = text
@@ -237,6 +244,11 @@ class SearchPanel(QWidget):
         )
 
     def show_result(self, result: SearchResult) -> None:
+        background, self._background_pending = self._background_pending, False
+        if background and _signature(result) == _signature(self._last_result):
+            self._last_result = result
+            return
+        view = self._view_state() if background else None
         self._last_result = result
         self.model.removeRows(0, self.model.rowCount())
         for group in result.groups:
@@ -245,11 +257,49 @@ class SearchPanel(QWidget):
         if result.groups:
             self.tree.show()
             self.empty_label.hide()
-            self.tree.scrollToTop()
+            if view is None:
+                self.tree.scrollToTop()
+            else:
+                self._restore_view(view)
         else:
             self._show_empty("Nothing found in the searchable accounts" + (
                 " with these filters." if self._active_filter_count() else "."
             ))
+
+    def _view_state(self) -> tuple[set[tuple], tuple | None, int]:
+        """(expanded groups, selected row, scroll position) to restore after a rebuild."""
+        expanded: set[tuple] = set()
+        for row in range(self.model.rowCount()):
+            index = self.model.index(row, TITLE_COL)
+            if self.tree.isExpanded(index):
+                expanded.add(_row_key(index.data(_PAYLOAD)))
+        current = self.tree.currentIndex()
+        selected = None
+        if current.isValid():
+            selected = (
+                _row_key(current.parent().siblingAtColumn(TITLE_COL).data(_PAYLOAD)) if current.parent().isValid() else None,
+                _row_key(current.siblingAtColumn(TITLE_COL).data(_PAYLOAD)),
+            )
+        return expanded, selected, self.tree.verticalScrollBar().value()
+
+    def _restore_view(self, view: tuple[set[tuple], tuple | None, int]) -> None:
+        expanded, selected, scroll = view
+        for row in range(self.model.rowCount()):
+            index = self.model.index(row, TITLE_COL)
+            key = _row_key(index.data(_PAYLOAD))
+            if key in expanded:
+                self.tree.setExpanded(index, True)
+            if selected is None:
+                continue
+            parent_key, own_key = selected
+            if parent_key is None and key == own_key:
+                self.tree.setCurrentIndex(index)
+            elif parent_key == key:
+                for child in range(self.model.rowCount(index)):
+                    child_index = self.model.index(child, TITLE_COL, index)
+                    if _row_key(child_index.data(_PAYLOAD)) == own_key:
+                        self.tree.setCurrentIndex(child_index)
+        self.tree.verticalScrollBar().setValue(scroll)
 
     def _group_row(self, group: SearchGroup) -> list[QStandardItem]:
         count = group.account_count
@@ -341,8 +391,10 @@ class SearchPanel(QWidget):
         self.empty_label.show()
         self.tree.hide()
 
-    def _emit_search(self) -> None:
+    def _emit_search(self, background: bool = False) -> None:
         self._debounce.stop()
+        # The newest request decides: a search the user starts resets the view.
+        self._background_pending = background
         text = self.query_edit.text().strip()
         if len(text) < 2:
             self.model.removeRows(0, self.model.rowCount())
@@ -392,3 +444,22 @@ class SearchPanel(QWidget):
         self._search_action.setIcon(theme.icon("search"))
         self.show_result(self._last_result)
 
+
+def _row_key(payload: SearchGroup | SearchHit | None) -> tuple:
+    """What identifies a row across searches."""
+    if isinstance(payload, SearchGroup):
+        return ("group", payload.kind, payload.title, payload.year)
+    if isinstance(payload, SearchHit):
+        return ("hit", payload.account_key, payload.kind, payload.provider_id)
+    return ()
+
+
+def _signature(result: SearchResult) -> tuple:
+    """Equal signatures render identical rows, so a background result can be skipped."""
+    return tuple(
+        (
+            _row_key(group),
+            tuple(sorted((*_row_key(hit), hit.starred, hit.stream_ok, hit.free_slots) for hit in group.hits)),
+        )
+        for group in result.groups
+    )

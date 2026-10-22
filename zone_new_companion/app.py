@@ -156,8 +156,13 @@ def run() -> None:
             on_error=on_error,
         ),
     )
-    # Accounts changing state (down, removed, newly indexed) re-run the search.
-    controller.set_catalog_listener(lambda text: (panel.set_status(text), panel.refresh()))
+    # Accounts changing state (down, removed, newly indexed) re-run the search
+    # quietly: what the user opened or scrolled to stays.
+    controller.set_catalog_listener(
+        lambda text, states: (panel.set_status(text), window.set_index_states(states), panel.refresh(background=True)),
+    )
+    window.set_index_limit(controller.index_limit)
+    window.index_limit_changed.connect(controller.set_index_limit)
     controller.sync_catalog()
 
     window.set_theme_mode(theme.mode)
@@ -174,6 +179,8 @@ def run() -> None:
         window.debug_dump_requested.connect(lambda: controller.dump_full_catalog(window.notify, on_error))
 
     qt_app.aboutToQuit.connect(lambda: controller.save_ui_state(window.width(), window.height()))
+    # Stop indexing and let background tasks end before Qt tears the objects down.
+    qt_app.aboutToQuit.connect(controller.shutdown)
     
     # Show as normal window with controls (not fullscreen) - ensures minimize/maximize/close buttons
     window.show()
