@@ -38,7 +38,7 @@ Zone New Companion is a modern, cross-platform PyQt6 application that unifies IP
 - **Real-Time Updates** — Live progress indicators
 
 ### User Experience
-- **Dark Theme** — Professional appearance with QDarkStyle
+- **Modern Theme** — Fusion-based light and dark styling with the bundled Inter font
 - **History Management** — Persistent credential storage
 - **Full-Screen Mode** — Immersive browsing experience
 - **Tooltips & Guidance** — Helpful inline documentation
