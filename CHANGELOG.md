@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Filters for quality, release year, recently added, category, streaming accounts, free connections and expiry; sorting by match, year, date added, number of accounts or title; the Language setting applies to the search as well
   - Only the first 5 working accounts are indexed by default (starred first, then the ones that stream); View → Search index changes the limit, and a new *Search* column in Working Accounts shows each account's state (Indexed, Indexing…, Queued, Not indexed, Paused)
   - Results that update in the background keep expanded rows, the selection and the scroll position
+  - Catalogs also refresh while the app stays open (checked hourly, failed ones are retried); View → Search index sets how often (12 hours, 24 hours, 3 days), shows the index size, and offers *Refresh all now* and *Clear index…*
+  - Right-click an account in Working Accounts → *Refresh search index* downloads its catalog again right away; a failed refresh keeps the older catalog and shows the error in the Search column's tooltip
 
 ### Changed
 - **Stream Verification without external tools**: Verify now plays a few seconds of each stream headless through the bundled libmpv and reports *OK (Video+Audio)*, *OK (Video)*, *OK (Audio)* or why it is *OFF* (Unreachable, Timeout, Stalled, No Video/Audio)

@@ -30,6 +30,8 @@ class UiSettings:
     language_strict: bool = True
     # Working accounts whose catalog is downloaded for search (0 = all).
     search_index_limit: int = 5
+    # Catalogs older than this are downloaded again.
+    search_index_max_age_hours: int = 24
 
 
 @dataclass(slots=True)
@@ -104,6 +106,7 @@ class ConfigStore:
             language=str(ui_payload.get("language", "")),
             language_strict=bool(ui_payload.get("language_strict", True)),
             search_index_limit=max(0, int(ui_payload.get("search_index_limit", 5))),
+            search_index_max_age_hours=max(1, int(ui_payload.get("search_index_max_age_hours", 24))),
         )
         working_accounts = [
             BulkResult(

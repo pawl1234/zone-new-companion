@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from datetime import datetime
+from typing import Callable
 from urllib.parse import urlparse
 
 from PyQt6.QtCore import QModelIndex, QSize, QSortFilterProxyModel, Qt, pyqtSignal
@@ -83,6 +84,11 @@ class MainWindow(QMainWindow):
     theme_mode_changed = pyqtSignal(str)
     # How many working accounts are indexed for search (0 = all).
     index_limit_changed = pyqtSignal(int)
+    # Hours after which catalogs are downloaded again.
+    index_max_age_changed = pyqtSignal(int)
+    # Carries the account to re-index now, or None for all of them.
+    index_refresh_requested = pyqtSignal(object)
+    index_clear_requested = pyqtSignal()
 
     # Ordered by importance: type + provider + real URL lead, account details follow.
     # The leading star column pins an account to the top of the list.
@@ -98,6 +104,7 @@ class MainWindow(QMainWindow):
     _SEARCH_COL = 3
     _STRETCH_COLS = (4, 5)
     _INDEX_LIMITS = (3, 5, 10, 20, 0)
+    _INDEX_MAX_AGES = ((12, "12 hours"), (24, "24 hours"), (72, "3 days"))
     # Badge text and color token per PortalType value.
     _TYPE_BADGES = {
         "xtream": ("XTREAM", "xtream"),
@@ -130,6 +137,18 @@ class MainWindow(QMainWindow):
 
         index_menu = self._view_menu.addMenu("Search index")
         index_menu.setToolTipsVisible(True)
+        # Filled in when the menu opens, from set_index_size_provider.
+        self._index_size_action = index_menu.addAction("")
+        self._index_size_action.setEnabled(False)
+        self._index_size_provider: Callable[[], int] | None = None
+        index_menu.aboutToShow.connect(self._update_index_size)
+        refresh_all = index_menu.addAction("Refresh all now", lambda: self.index_refresh_requested.emit(None))
+        refresh_all.setToolTip("Download every indexed account's catalog again")
+        theme.bind_icon(refresh_all, "refresh-cw")
+        clear_index = index_menu.addAction("Clear index…", self._confirm_clear_index)
+        clear_index.setToolTip("Delete all downloaded catalogs and build them again")
+        theme.bind_icon(clear_index, "trash-2")
+        index_menu.addSeparator()
         self._index_limit_actions = QActionGroup(self)
         for limit in self._INDEX_LIMITS:
             action = index_menu.addAction(f"Index up to {limit} accounts" if limit else "Index all accounts")
@@ -138,6 +157,17 @@ class MainWindow(QMainWindow):
             action.setToolTip("Starred accounts come first, then the ones that stream")
             self._index_limit_actions.addAction(action)
         self._index_limit_actions.triggered.connect(lambda action: self.index_limit_changed.emit(action.data()))
+        index_menu.addSeparator()
+        self._index_max_age_actions = QActionGroup(self)
+        for hours, label in self._INDEX_MAX_AGES:
+            action = index_menu.addAction(f"Refresh every {label}")
+            action.setCheckable(True)
+            action.setData(hours)
+            action.setToolTip("Catalogs older than this are downloaded again")
+            self._index_max_age_actions.addAction(action)
+        self._index_max_age_actions.triggered.connect(
+            lambda action: self.index_max_age_changed.emit(action.data()),
+        )
 
         self._help_info_action = self._help_menu.addAction("Info")
         theme.bind_icon(self._help_info_action, "info")
@@ -259,6 +289,8 @@ class MainWindow(QMainWindow):
             )
             self.accounts_table.horizontalHeader().setSectionResizeMode(col, mode)
         self.accounts_table.cellClicked.connect(self._emit_working_account)
+        self.accounts_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.accounts_table.customContextMenuRequested.connect(self._show_account_menu)
         accounts_layout.addWidget(self.accounts_table, 1)
 
         right = QWidget()
@@ -402,6 +434,45 @@ class MainWindow(QMainWindow):
         """Tick the View → Search index entry without emitting index_limit_changed."""
         for action in self._index_limit_actions.actions():
             action.setChecked(action.data() == limit)
+
+    def set_index_max_age(self, hours: int) -> None:
+        """Tick the refresh interval without emitting index_max_age_changed."""
+        for action in self._index_max_age_actions.actions():
+            action.setChecked(action.data() == hours)
+
+    def set_index_size_provider(self, provider: Callable[[], int]) -> None:
+        """Where the Search index menu reads the database size (bytes) from."""
+        self._index_size_provider = provider
+
+    def _update_index_size(self) -> None:
+        size = self._index_size_provider() if self._index_size_provider is not None else 0
+        self._index_size_action.setText(f"Index size: {_file_size(size)}")
+
+    def _confirm_clear_index(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Clear search index",
+            "Delete all downloaded catalogs?\n\n"
+            "They are downloaded again right away; search shows less until that is done.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.index_clear_requested.emit()
+
+    def _show_account_menu(self, pos) -> None:
+        row = self.accounts_table.rowAt(pos.y())
+        cell = self.accounts_table.item(row, self._STAR_COL) if row >= 0 else None
+        result = cell.data(Qt.ItemDataRole.UserRole) if cell is not None else None
+        if result is None:
+            return
+        self.accounts_table.selectRow(row)
+        menu = QMenu(self.accounts_table)
+        # Built per click, so a plain icon: bind_icon would keep every menu alive.
+        menu.addAction(
+            theme.icon("refresh-cw"), "Refresh search index", lambda: self.index_refresh_requested.emit(result),
+        )
+        menu.exec(self.accounts_table.viewport().mapToGlobal(pos))
 
     def set_index_states(self, states: dict[tuple, tuple[str, str, str]]) -> None:
         """Update the Search column in place (no full redraw, selection stays)."""
@@ -774,3 +845,11 @@ class MainWindow(QMainWindow):
         self.verify_cancel_requested.emit()
 
     # All logs emit methods removed for performance
+
+
+def _file_size(size: int) -> str:
+    if size < 1024 * 1024:
+        return f"{size / 1024:.0f} KB"
+    if size < 1024 ** 3:
+        return f"{size / 1024 ** 2:.1f} MB"
+    return f"{size / 1024 ** 3:.2f} GB"

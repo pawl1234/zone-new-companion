@@ -15,7 +15,8 @@ from zone_new_companion.services.xtream_service import XtreamService
 
 LOGGER = logging.getLogger(__name__)
 
-# Catalogs older than this are downloaded again.
+# Catalogs older than this are downloaded again, unless the user picks
+# another interval under View → Search index.
 MAX_AGE_SECONDS = 24 * 3600
 # Portal types the indexer can read; the rest is skipped for now.
 INDEXED_PORTALS = ("xtream",)

@@ -485,6 +485,38 @@ class CatalogStore:
         groups = _sort_groups(_group(hits), filters.sort)
         return SearchResult(groups[:GROUP_LIMIT], truncated=len(rows) >= ROW_LIMIT or len(groups) > GROUP_LIMIT)
 
+    # Maintenance --------------------------------------------------------------
+
+    def size_bytes(self) -> int:
+        """Disk space of the database, write-ahead log included."""
+        total = 0
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                total += Path(f"{self._path}{suffix}").stat().st_size
+            except OSError:
+                pass
+        return total
+
+    def clear(self) -> None:
+        """Delete every catalog and shrink the file; the accounts stay.
+
+        Done in SQL, not by deleting the file: other threads keep connections open.
+        """
+        with self._write_lock:
+            connection = self._conn()
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                # Cascades to categories and items; accounts lose their link.
+                connection.execute("DELETE FROM source")
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+            if self.has_fts:
+                connection.execute("INSERT INTO item_fts(item_fts) VALUES ('rebuild')")
+            connection.execute("VACUUM")
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+
     def stats(self) -> CatalogStats:
         connection = self._conn()
         accounts, indexed = connection.execute(

@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urlparse
 
 from zone_new_companion.services.logger_service import logger_service
 
-from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
+from PyQt6.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
 
 from zone_new_companion.config import AppConfig, ConfigStore
 from zone_new_companion.models import Credentials, MediaItem, PlaylistCategory, PortalType
@@ -31,7 +31,7 @@ from zone_new_companion.services.bulk_checker import (
     now_stamp,
     result_from_credentials,
 )
-from zone_new_companion.services.catalog_indexer import INDEXED_PORTALS, MAX_AGE_SECONDS, index_account, server_of
+from zone_new_companion.services.catalog_indexer import INDEXED_PORTALS, index_account, server_of
 from zone_new_companion.services.catalog_store import CatalogAccount, CatalogStore, SearchFilters, SearchHit, SearchResult
 from zone_new_companion.services.country_filter import codes_for_language, filter_items
 from zone_new_companion.services.filter_debug import FilterDebugDumper, debug_enabled
@@ -45,6 +45,9 @@ from zone_new_companion.state import StateStore
 from zone_new_companion.workers.task_worker import BulkCheckSignals, TaskWorker, safe_emit
 
 LOGGER = logging.getLogger(__name__)
+
+# How often the open app looks for outdated or failed catalogs.
+INDEX_CHECK_INTERVAL_MS = 3600 * 1000
 
 
 class AppController:
@@ -86,7 +89,9 @@ class AppController:
         # app), with a separate service so its session stays off the UI's.
         self._catalog = catalog
         self._index_service = XtreamService()
-        self._index_queue: queue.Queue[tuple[str, Credentials] | None] = queue.Queue()
+        # (account key, credentials, fresh_after): a catalog stored after
+        # fresh_after (epoch) is reused, an older one downloaded again.
+        self._index_queue: queue.Queue[tuple[str, Credentials, float] | None] = queue.Queue()
         self._index_stop = threading.Event()
         self._index_thread: threading.Thread | None = None
         # Created here, in the UI thread, so its signals arrive there.
@@ -97,6 +102,9 @@ class AppController:
         self._index_running: str | None = None
         self._index_errors: dict[str, str] = {}
         self._catalog_listener: Callable[[str, dict], None] | None = None
+        # Catalogs go stale while the app stays open: look for outdated ones
+        # (and retry failed ones) every hour. Started by the first sync_catalog.
+        self._index_timer: QTimer | None = None
         self._search_generation = 0
         self._state_store.update(language=self._config.ui.language, language_strict=self._config.ui.language_strict)
 
@@ -971,6 +979,38 @@ class AppController:
         self._config_store.save(self._config)
         self.sync_catalog()
 
+    @property
+    def index_max_age_hours(self) -> int:
+        return self._config.ui.search_index_max_age_hours
+
+    def set_index_max_age_hours(self, hours: int) -> None:
+        """Download catalogs again once they are older than ``hours``."""
+        self._config.ui.search_index_max_age_hours = max(1, hours)
+        self._config_store.save(self._config)
+        self._schedule_indexing()
+
+    def index_size(self) -> int:
+        """Bytes catalog.db takes on disk."""
+        return self._catalog.size_bytes() if self._catalog is not None else 0
+
+    def clear_index(self, on_success: Callable[[str], None], on_error: Callable[[str], None]) -> None:
+        """Delete every downloaded catalog, then index the accounts again."""
+        if self._catalog is None:
+            return
+        catalog = self._catalog
+        token = self._begin_activity("Clearing the search index…")
+        worker = TaskWorker(catalog.clear)
+
+        def cleared(_result: object) -> None:
+            self._index_errors.clear()
+            on_success("Search index cleared, downloading again…")
+            self._schedule_indexing()
+
+        worker.signals.succeeded.connect(cleared)
+        worker.signals.failed.connect(lambda message: on_error(f"Could not clear the search index: {message}"))
+        worker.signals.finished.connect(lambda: self._end_activity(token))
+        self._thread_pool.start(worker)
+
     def _indexable(self) -> list[BulkResult]:
         """The accounts whose catalog is kept: the first ``limit`` up and indexable ones.
 
@@ -992,6 +1032,11 @@ class AppController:
         """
         if self._catalog is None:
             return
+        if self._index_timer is None:
+            self._index_timer = QTimer()
+            self._index_timer.setInterval(INDEX_CHECK_INTERVAL_MS)
+            self._index_timer.timeout.connect(self._schedule_indexing)
+            self._index_timer.start()
         catalog = self._catalog
         accounts = [
             CatalogAccount(
@@ -1021,15 +1066,50 @@ class AppController:
     def _schedule_indexing(self) -> None:
         if self._catalog is None or self._index_stop.is_set():
             return
+        max_age = self.index_max_age_hours * 3600
         accounts = {catalog_key(account): account for account in self._indexable()}
-        for key in self._catalog.needing_index(list(accounts), MAX_AGE_SECONDS):
+        self._enqueue(accounts, self._catalog.needing_index(list(accounts), max_age), time.time() - max_age)
+
+    def refresh_index(self, account: BulkResult | None = None) -> str:
+        """Download the account's catalog again now, or every indexed one's (None).
+
+        Accounts sharing a catalog download it once: whatever a refresh stored
+        after the request counts as fresh. Returns a line for the user.
+        """
+        if self._catalog is None:
+            return "Search is not available."
+        accounts = {catalog_key(item): item for item in self._indexable()}
+        if account is not None:
+            key = catalog_key(account)
+            if account.portal_type not in INDEXED_PORTALS:
+                return f"{account.portal_type.upper()} accounts are not searchable yet."
+            if key not in accounts:
+                if account.stream_ok is False:
+                    return "This account is down; Recheck it first."
+                return "This account is beyond the index limit (View → Search index)."
+            keys = [key]
+        else:
+            keys = list(accounts)
+        if not keys:
+            return "No accounts to index."
+        added = self._enqueue(accounts, keys, time.time())
+        if not added:
+            return "Already indexing."
+        return f"Refreshing the search index of {added} account{'s' if added != 1 else ''}…"
+
+    def _enqueue(self, accounts: dict[str, BulkResult], keys: list[str], fresh_after: float) -> int:
+        """Queue ``keys`` not queued yet and start the indexer; how many were added."""
+        added = 0
+        for key in keys:
             if key not in self._indexing:
                 self._indexing.add(key)
-                self._index_queue.put((key, credentials_for(accounts[key])))
+                self._index_queue.put((key, credentials_for(accounts[key]), fresh_after))
+                added += 1
         if self._indexing and self._index_thread is None:
             self._index_thread = threading.Thread(target=self._index_loop, name="catalog-indexer", daemon=True)
             self._index_thread.start()
         self._report_catalog_status()
+        return added
 
     def _index_loop(self) -> None:
         """Indexer thread: one queued account after the other until shutdown."""
@@ -1038,10 +1118,13 @@ class AppController:
             job = self._index_queue.get()
             if job is None or stop.is_set():
                 return
-            key, credentials = job
+            key, credentials, fresh_after = job
             safe_emit(self._index_signals.started, key)
             try:
-                summary = index_account(catalog, service, credentials, key, cancelled=stop.is_set)
+                summary = index_account(
+                    catalog, service, credentials, key,
+                    max_age_seconds=time.time() - fresh_after, cancelled=stop.is_set,
+                )
             except Exception as exc:  # noqa: BLE001 - reported per account, the loop goes on
                 if stop.is_set():
                     return
@@ -1071,6 +1154,8 @@ class AppController:
         half-done is stored.
         """
         self._index_stop.set()
+        if self._index_timer is not None:
+            self._index_timer.stop()
         self.cancel_bulk_check()
         while True:
             try:
@@ -1124,9 +1209,13 @@ class AppController:
             return "Queued", "Waiting for the accounts ahead of it", "text_muted"
         if key in info:
             indexed_at, count = info[key]
-            return "Indexed", f"{count:,} streams, updated {_ago(indexed_at)}", "success"
+            tip = f"{count:,} streams, updated {_ago(indexed_at)}"
+            if key in self._index_errors:
+                # The last refresh failed; the older catalog is still searched.
+                return "Indexed", f"{tip}\nLast refresh failed: {self._index_errors[key]}", "warning"
+            return "Indexed", tip, "success"
         if key in self._index_errors:
-            return "Failed", f"Indexing failed: {self._index_errors[key]}\nRetried on the next change or restart", "danger"
+            return "Failed", f"Indexing failed: {self._index_errors[key]}\nRetried within the hour", "danger"
         if key not in indexable:
             limit = self.index_limit
             return (

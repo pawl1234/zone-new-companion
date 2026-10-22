@@ -163,6 +163,11 @@ def run() -> None:
     )
     window.set_index_limit(controller.index_limit)
     window.index_limit_changed.connect(controller.set_index_limit)
+    window.set_index_max_age(controller.index_max_age_hours)
+    window.index_max_age_changed.connect(controller.set_index_max_age_hours)
+    window.set_index_size_provider(controller.index_size)
+    window.index_refresh_requested.connect(lambda account: window.notify(controller.refresh_index(account)))
+    window.index_clear_requested.connect(lambda: controller.clear_index(window.notify, on_error))
     controller.sync_catalog()
 
     window.set_theme_mode(theme.mode)
