@@ -67,6 +67,8 @@ class AppController:
         self._loading_key: dict[str, str | None] = {"Live": None, "Movies": None, "Series": None}
         self._loading_activity: dict[str, int | None] = {"Live": None, "Movies": None, "Series": None}
         self._resolving: set[str] = set()
+        # Opens a resolved stream in the built-in player; None means VLC plays everything.
+        self._builtin_player: Callable[[str, MediaItem], None] | None = None
         # DEBUG=1 / --debug: write loaded lists and filter verdicts to disk.
         self._debug = FilterDebugDumper() if debug_enabled() else None
         self._state_store.update(language=self._config.ui.language, language_strict=self._config.ui.language_strict)
@@ -399,15 +401,21 @@ class AppController:
         if tab_name == "Live":
             self._prefetch_now_playing(items[:10])
 
+    def set_builtin_player(self, player: Callable[[str, MediaItem], None] | None) -> None:
+        """Play streams in the app's own player instead of external VLC."""
+        self._builtin_player = player
+
     def play(
         self,
         item: MediaItem,
         on_success: Callable[[str], None],
         on_error: Callable[[str], None],
         prefer_hls: bool = False,
+        use_vlc: bool = False,
     ) -> None:
-        """Resolve stream and launch VLC asynchronously.
+        """Resolve the stream and play it in the built-in player, or in VLC.
 
+        VLC plays when use_vlc is set or the built-in player is unavailable.
         With prefer_hls the stream's HLS (.m3u8) variant plays instead; it is an
         error when the server offers none.
         """
@@ -421,6 +429,7 @@ class AppController:
             return
         self._resolving.add(item.id)
         token = self._begin_activity(f"Starting {item.name}…")
+        builtin = None if use_vlc else self._builtin_player
 
         def task() -> str:
             stream_url = self._service_for(profile).resolve_stream_url(profile, item)
@@ -429,11 +438,14 @@ class AppController:
                 if hls_url is None:
                     raise ValueError(f"No HLS (m3u8) stream for {item.name}.")
                 stream_url = hls_url
-            launch_stream(stream_url)
+            if builtin is None:
+                launch_stream(stream_url)
             return stream_url
 
-        def on_played(_url: str) -> None:
-            label = f"Playing {item.name}" + (" (HLS)" if prefer_hls else "")
+        def on_played(url: str) -> None:
+            if builtin is not None:
+                builtin(url, item)
+            label = f"Playing {item.name}" + (" (HLS)" if prefer_hls else "") + (" in VLC" if builtin is None else "")
             self._state_store.update(status_text=label)
             on_success(label)
 

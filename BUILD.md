@@ -54,6 +54,21 @@ For application dependencies:
 pip install -r requirements.txt
 ```
 
+### Built-in Player (libmpv)
+
+The built-in player needs the libmpv shared library next to the app. Without
+it the app still runs and plays everything in external VLC.
+
+| Platform | Get libmpv | Bundle with PyInstaller |
+|----------|-----------|-------------------------|
+| Windows | `mpv-dev-x86_64-*.7z` from [shinchiro's mpv builds](https://github.com/shinchiro/mpv-winbuild-cmake/releases); copy `libmpv-2.dll` into the project root | `--add-binary "libmpv-2.dll;."` |
+| macOS | `brew install mpv` | `--add-binary "/opt/homebrew/lib/libmpv.2.dylib:."` (PyInstaller collects its dependent dylibs) |
+| Linux | `sudo apt install libmpv2` (Fedora: `mpv-libs`) | Not bundled; declared as a package dependency |
+
+License: the default libmpv builds are GPL. For an MIT release, ship an
+LGPL build of libmpv (mpv built with `-Dgpl=false`) or publish the libmpv
+source alongside it.
+
 ---
 
 ## Windows (.exe)
@@ -91,6 +106,8 @@ pip install -r requirements.txt
      --hidden-import cv2 `
      --hidden-import numpy `
      --hidden-import PIL `
+     --hidden-import mpv `
+     --add-binary "libmpv-2.dll;." `
      --collect-all pytesseract `
      --collect-all cv2 `
      --exclude-module matplotlib `
@@ -190,7 +207,8 @@ The icon is automatically embedded when using the `--icon` flag with PyInstaller
    Section: video
    Priority: optional
    Architecture: amd64
-   Depends: vlc, python3
+   Depends: libmpv2, python3
+   Recommends: vlc
    Maintainer: Kidpoleon <kidpoleon@proton.me>
    Description: Unified desktop IPTV companion app
     Zone New Companion is a unified desktop IPTV companion app
@@ -233,7 +251,8 @@ The icon is automatically embedded when using the `--icon` flag with PyInstaller
    License:        MIT
    URL:            https://github.com/kidpoleon/zone-new-companion
    
-   Requires:       vlc
+   Requires:       mpv-libs
+   Recommends:     vlc
    
    %description
    Zone New Companion is a unified desktop IPTV companion app
@@ -284,6 +303,8 @@ The icon is automatically embedded when using the `--icon` flag with PyInstaller
      --hidden-import cv2 \
      --hidden-import numpy \
      --hidden-import PIL \
+     --hidden-import mpv \
+     --add-binary "/opt/homebrew/lib/libmpv.2.dylib:." \
      --collect-all pytesseract \
      --collect-all cv2 \
      --exclude-module matplotlib \
@@ -446,7 +467,8 @@ Before releasing, verify:
 - [ ] Version number updated in all files
 - [ ] Icon properly embedded
 - [ ] Application launches without errors
-- [ ] VLC integration works
+- [ ] Built-in player plays live TV, movies and series (libmpv bundled)
+- [ ] Right-click → Open in VLC works
 - [ ] All portal types tested (Xtream, Stalker, M3U)
 - [ ] Stream playback verified
 - [ ] No debug/console window shows (for windowed builds)

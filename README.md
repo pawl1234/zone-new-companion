@@ -52,7 +52,8 @@ Before running Zone New Companion, ensure you have the following dependencies in
 
 #### Required for All Platforms
 - **Python 3.8+** — Application runtime
-- **VLC Media Player** — Required for streaming playback
+- **libmpv** — Built-in player (bundled with the packaged app; for running from source: `brew install mpv`, `apt install libmpv2`, or `libmpv-2.dll` next to `main.py` on Windows)
+- **VLC Media Player** — Optional; used when libmpv is missing, and via right-click → *Open in VLC*
 
 #### Optional for OCR Features
 - **Tesseract OCR** — Frame text recognition
@@ -280,7 +281,21 @@ python main.py
    - **Stalker**: URL, MAC Address  
    - **M3U**: Playlist URL
 4. **Click Connect** — categories load automatically
-5. **Browse & Play** — double-click items to launch in VLC
+5. **Browse & Play** — double-click items to play them in the built-in player (right-click → *Open in VLC* for the external player)
+
+### Built-in Player
+
+| Key | Action |
+|-----|--------|
+| Space / K | Play / pause |
+| ← / → | Back / forward 10 s |
+| J / L | Back / forward 30 s (also on live TV, within the buffer) |
+| ↑ / ↓ | Volume |
+| A / S | Next audio track / subtitle |
+| M | Mute |
+| F, double-click | Fullscreen (Esc leaves) |
+
+Live channels start about 5 s behind live, so dropped connections reconnect without the picture stopping.
 
 ### Verification System
 
@@ -302,6 +317,7 @@ Settings stored at:
 
 | Issue | Solution |
 |-------|----------|
+| Plays in VLC instead of the built-in player | libmpv was not found; see the log in `~/.zone-new-companion/logs` |
 | VLC not found | Install VLC and ensure it's in PATH |
 | Connection failed | Check URL format and credentials |
 | Icon not showing | Restart Windows Explorer or clear icon cache |

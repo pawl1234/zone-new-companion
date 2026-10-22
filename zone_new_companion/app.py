@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import os
 from pathlib import Path
@@ -28,6 +29,7 @@ from PyQt6.QtCore import Qt
 
 from zone_new_companion.config import ConfigStore
 from zone_new_companion.controllers.app_controller import AppController
+from zone_new_companion.services import libmpv
 from zone_new_companion.services.bulk_checker import BulkResult, friendly_error, is_server_unavailable
 from zone_new_companion.logging_config import configure_logging
 from zone_new_companion.services.filter_debug import DEBUG_DIR, debug_enabled
@@ -93,6 +95,12 @@ def run() -> None:
     window.hls_play_requested.connect(
         lambda item: controller.play(item, on_success=window.notify, on_error=on_error, prefer_hls=True),
     )
+    window.vlc_play_requested.connect(
+        lambda item, hls: controller.play(item, on_success=window.notify, on_error=on_error, prefer_hls=hls, use_vlc=True),
+    )
+    player = _create_player(controller)
+    if player is not None:
+        qt_app.aboutToQuit.connect(player.shutdown)
     window.hls_probe_requested.connect(
         lambda item: controller.probe_hls(
             item, on_result=lambda hls_url: window.show_hls_result(item.name, hls_url), on_error=on_error,
@@ -145,6 +153,23 @@ def run() -> None:
     window.show()
     
     sys.exit(qt_app.exec())
+
+
+def _create_player(controller: AppController):
+    """The built-in player window, or None (VLC plays) when libmpv is missing or fails."""
+    mpv_module = libmpv.load()
+    if mpv_module is None:
+        return None
+    # Imported here: the module needs python-mpv, which only loads with libmpv present.
+    from zone_new_companion.ui.widgets.player_window import PlayerWindow
+
+    try:
+        player = PlayerWindow(mpv_module)
+    except Exception:  # noqa: BLE001 - any libmpv startup failure means VLC
+        logging.getLogger(__name__).exception("Built-in player failed to start, using VLC")
+        return None
+    controller.set_builtin_player(lambda url, item: player.play(url, item.name, live=item.item_type == "channel"))
+    return player
 
 
 def _load_category(

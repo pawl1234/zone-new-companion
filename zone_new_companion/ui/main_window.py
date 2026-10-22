@@ -59,6 +59,8 @@ class MainWindow(QMainWindow):
     verify_item_requested = pyqtSignal(str, object)
     hls_probe_requested = pyqtSignal(object)
     hls_play_requested = pyqtSignal(object)
+    # Carries the item and whether to play its HLS variant.
+    vlc_play_requested = pyqtSignal(object, bool)
     verify_all_channels_requested = pyqtSignal(str)
     verify_tab_requested = pyqtSignal(str)
     verify_cancel_requested = pyqtSignal()
@@ -677,7 +679,10 @@ class MainWindow(QMainWindow):
             return
         menu = QMenu(table)
         menu.addAction("Play", lambda: self.item_activated.emit(tab_name, media))
-        menu.addAction("Play HLS in VLC", lambda: self.hls_play_requested.emit(media))
+        menu.addAction("Play HLS", lambda: self.hls_play_requested.emit(media))
+        vlc_menu = menu.addMenu("Open in VLC")
+        vlc_menu.addAction("Play", lambda: self.vlc_play_requested.emit(media, False))
+        vlc_menu.addAction("Play HLS", lambda: self.vlc_play_requested.emit(media, True))
         menu.addAction("Verify", lambda: self.verify_item_requested.emit(tab_name, media))
         menu.addAction("Check for HLS (m3u8)", lambda: self.hls_probe_requested.emit(media))
         if media.item_type == "episode":
