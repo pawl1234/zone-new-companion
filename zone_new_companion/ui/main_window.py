@@ -527,11 +527,25 @@ class MainWindow(QMainWindow):
     def set_index_states(self, states: dict[tuple, tuple[str, str, str]]) -> None:
         """Update the Search column in place (no full redraw, selection stays)."""
         self._index_states = dict(states)
-        for row in range(self.accounts_table.rowCount()):
-            star = self.accounts_table.item(row, self._STAR_COL)
-            cell = self.accounts_table.item(row, self._SEARCH_COL)
-            if star is not None and cell is not None and star.data(Qt.ItemDataRole.UserRole) is not None:
-                self._fill_search_cell(cell, star.data(Qt.ItemDataRole.UserRole))
+        # A ResizeToContents column measures every row on each cell change, so
+        # filling cell by cell is quadratic (seconds with hundreds of accounts on
+        # Windows). Hold the sizes while filling; restoring the mode resizes once.
+        header = self.accounts_table.horizontalHeader()
+        fitted = [
+            col for col in range(header.count())
+            if header.sectionResizeMode(col) == QHeaderView.ResizeMode.ResizeToContents
+        ]
+        for col in fitted:
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+        try:
+            for row in range(self.accounts_table.rowCount()):
+                star = self.accounts_table.item(row, self._STAR_COL)
+                cell = self.accounts_table.item(row, self._SEARCH_COL)
+                if star is not None and cell is not None and star.data(Qt.ItemDataRole.UserRole) is not None:
+                    self._fill_search_cell(cell, star.data(Qt.ItemDataRole.UserRole))
+        finally:
+            for col in fitted:
+                header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
 
     def _fill_search_cell(self, cell: QTableWidgetItem, result) -> None:
         text, tip, token = self._index_states.get(account_key(result), ("", "", "text_muted"))
